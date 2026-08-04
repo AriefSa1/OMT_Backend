@@ -8,5 +8,6 @@ router.use(authMiddleware);
 router.get('/', settingsController.getSettings);
 router.post('/', settingsController.updateSettings);
 router.put('/', settingsController.updateSettings);
+router.post('/test-warehouse', settingsController.testWarehouseConnection);
 
 module.exports = router;

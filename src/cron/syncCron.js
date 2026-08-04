@@ -19,8 +19,12 @@ function initCronJobs(interval = '15m') {
   const schedule = toCronExpression(interval);
   console.log(`[CRON Engine] Sync snapshot terjadwal: ${schedule}`);
   scheduledJobs.push(cron.schedule(schedule, async () => {
-    const result = await syncService.syncAll({ origin: 'CRON' });
-    console.log(`[CRON] ${result.message}`);
+    try {
+      const result = await syncService.syncAll({ origin: 'CRON' });
+      console.log(`[CRON] ${result.message}`);
+    } catch (error) {
+      console.error('[CRON] Sinkronisasi gagal:', error.message);
+    }
   }));
 }
 

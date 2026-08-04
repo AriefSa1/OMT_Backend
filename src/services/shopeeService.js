@@ -6,7 +6,30 @@ const { extractCsrfFromCookie, extractCatalogCsrfFromCookie, getShopeeHeaders } 
 let activeCookie = '';
 let cachedNormalizedProducts = [];
 const SHOPEE_HOMEPAGE_ADS_ENDPOINT = 'https://seller.shopee.co.id/api/pas/v1/homepage/query/';
+const SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v4/product/performance/';
 const ADS_AMOUNT_DIVISOR = 100000;
+const SHOPEE_ORDER_BY = {
+  'confirmed_sales.desc': 'confirmed_sales.desc',
+  'confirmed_order.desc': 'confirmed_orders.desc',
+  'confirmed_orders.desc': 'confirmed_orders.desc',
+  'item_views.desc': 'pv.desc',
+  'pv.desc': 'pv.desc',
+  'conversion_rate.desc': 'confirmed_order_conversion_rate.desc',
+  'confirmed_order_conversion_rate.desc': 'confirmed_order_conversion_rate.desc',
+  'add_to_cart_rate.desc': 'uv_to_add_to_cart_rate.desc',
+  'uv_to_add_to_cart_rate.desc': 'uv_to_add_to_cart_rate.desc',
+};
+
+function getJakartaDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
 
 function asFiniteNumber(value) {
   const number = Number(value);
@@ -50,6 +73,57 @@ function getJakartaDayRange() {
   const currentDayStart = Math.floor(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), -7, 0, 0) / 1000);
   const startTime = currentDayStart - (24 * 60 * 60);
   return { startTime, endTime: currentDayStart - 1 };
+}
+
+function getPeriodTimeRange(period = 'real_time', customStart = null, customEnd = null) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  const currentDayStart = Math.floor(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), -7, 0, 0) / 1000);
+  const now = Math.floor(Date.now() / 1000);
+  const ONE_DAY = 86400;
+
+  if (customStart && customEnd) {
+    return {
+      period: 'custom',
+      startTime: Number(customStart),
+      endTime: Number(customEnd),
+    };
+  }
+
+  switch (period) {
+    case 'real_time':
+      return {
+        period: 'real_time',
+        startTime: currentDayStart,
+        endTime: now,
+      };
+    case 'yesterday':
+      return {
+        period: 'yesterday',
+        startTime: currentDayStart - ONE_DAY,
+        endTime: currentDayStart - 1,
+      };
+    case 'past7days':
+      return {
+        period: 'past7days',
+        startTime: currentDayStart - (7 * ONE_DAY),
+        endTime: currentDayStart - 1,
+      };
+    case 'past30days':
+      return {
+        period: 'past30days',
+        startTime: currentDayStart - (30 * ONE_DAY),
+        endTime: currentDayStart - 1,
+      };
+    default:
+      return {
+        period: 'real_time',
+        startTime: currentDayStart,
+        endTime: now,
+      };
+  }
 }
 
 function emptyShopeeState(message = 'Connect your Shopee store in Settings to view real data.', errorCode = 'NOT_CONNECTED') {
@@ -166,7 +240,7 @@ class ShopeeService {
   }
 
   async persistOrderSummary(storeId, summary) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getJakartaDateKey();
     await prisma.shopeeOrderSummary.upsert({
       where: { storeId_date: { storeId, date: today } },
       update: {
@@ -237,15 +311,45 @@ class ShopeeService {
         Referer: 'https://seller.shopee.co.id/portal/product/list/all',
       };
 
-      const res = await axios.get(searchProductUrl, { headers, timeout: 10000 });
+      const rawProductsById = new Map();
+      let nextCursor = '';
+      let pageInfo = {};
+      let pageCount = 0;
+      let expectedProductCount = 0;
 
-      if (!res.data || res.data.code !== 0 || !Array.isArray(res.data.data?.products)) {
-        return emptyShopeeState('Shopee returned no product data. Check the cookie in Settings.');
+      // Seller Center uses a cursor chain for this endpoint; page/offset are ignored.
+      do {
+        const pageUrl = new URL(searchProductUrl);
+        if (nextCursor) pageUrl.searchParams.set('cursor', nextCursor);
+        const res = await axios.get(pageUrl.toString(), { headers, timeout: 10000 });
+
+        if (!res.data || res.data.code !== 0 || !Array.isArray(res.data.data?.products)) {
+          return emptyShopeeState('Shopee returned no product data. Check the cookie in Settings.');
+        }
+
+        pageInfo = res.data.data.page_info || {};
+        expectedProductCount = Number(pageInfo.total) || expectedProductCount;
+        for (const product of res.data.data.products) {
+          if (product.id !== undefined && product.id !== null) rawProductsById.set(String(product.id), product);
+        }
+
+        const previousCursor = nextCursor;
+        nextCursor = typeof pageInfo.cursor === 'string' ? pageInfo.cursor : '';
+        pageCount += 1;
+        if (!nextCursor || nextCursor === previousCursor || pageCount >= 20) break;
+      } while (rawProductsById.size < expectedProductCount);
+
+      if (expectedProductCount > 0 && rawProductsById.size < expectedProductCount) {
+        const error = new Error(`Shopee catalog pagination incomplete (${rawProductsById.size}/${expectedProductCount}).`);
+        error.code = 'INCOMPLETE_CATALOG';
+        throw error;
       }
 
-      const rawProducts = res.data.data.products;
+      const rawProducts = Array.from(rawProductsById.values());
+      if (!rawProducts.length) {
+        return emptyShopeeState('Shopee returned no product data. Check the cookie in Settings.');
+      }
       const normalizedProducts = rawProducts
-        .filter((item) => item.id !== undefined && item.id !== null)
         .map((item) => {
         const categoryPath = Array.isArray(item.category_path) ? item.category_path : findCategoryPath(item);
         const l2Category = categoryPath[1] || categoryPath[0] || null;
@@ -302,7 +406,7 @@ class ShopeeService {
         todayOrders: orderSummary?.todayOrders || 0,
         conversionRate: orderSummary?.conversionRate || 0,
         averageOrderValue: orderSummary?.averageOrderValue || 0,
-        activeProductsCount: res.data.data.page_info?.total || normalizedProducts.length,
+          activeProductsCount: expectedProductCount || normalizedProducts.length,
         pendingFulfillments: 0,
       };
 
@@ -344,6 +448,9 @@ class ShopeeService {
       }
       if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
         return emptyShopeeState('The Seller Center request timed out. Check your connection and try again.', 'REQUEST_TIMEOUT');
+      }
+      if (code === 'INCOMPLETE_CATALOG') {
+        return emptyShopeeState('Seller Center mengembalikan katalog yang belum lengkap. Jalankan Sync lagi setelah koneksi stabil.', code);
       }
 
       return emptyShopeeState(
@@ -474,6 +581,227 @@ class ShopeeService {
           ? 'Seller Center menolak sesi iklan. Perbarui cookie lalu jalankan Sync lagi.'
           : status ? `Shopee Ads mengembalikan HTTP ${status}.` : 'Shopee Ads tidak dapat dihubungi.',
         topCampaigns: [],
+      };
+    }
+  }
+
+  async fetchProductPerformance({
+    period = 'real_time',
+    startTime: customStart,
+    endTime: customEnd,
+    keyword = '',
+    categoryType = 'shopee',
+    categoryId = '-1',
+    pageSize = 10,
+    pageNum = 1,
+    orderType = 'confirmed',
+    orderBy = 'confirmed_sales.desc',
+  } = {}) {
+    const session = await this.getActiveSession();
+    const timeRange = getPeriodTimeRange(period, customStart, customEnd);
+
+    if (!session?.cookieString || !session?.storeId) {
+      return {
+        success: true,
+        live: false,
+        isRealDataActive: false,
+        dataSource: 'EMPTY',
+        storeName: '',
+        storeId: '',
+        period: timeRange.period,
+        startTime: timeRange.startTime,
+        endTime: timeRange.endTime,
+        total: 0,
+        products: [],
+        summary: {
+          totalSales: 0,
+          totalOrders: 0,
+          totalUnits: 0,
+          totalViews: 0,
+          totalVisitors: 0,
+          averageConversionRate: 0,
+          totalBuyers: 0,
+        },
+        pagination: {
+          page: Number(pageNum),
+          pageSize: Number(pageSize),
+          total: 0,
+          totalPages: 0,
+        },
+        message: 'Hubungkan sesi Shopee di Pengaturan untuk memuat performa produk real-time.',
+      };
+    }
+
+    try {
+      const csrfToken = extractCsrfFromCookie(session.cookieString);
+      if (!csrfToken) throw new Error('Sesi Shopee aktif tidak memiliki token CSRF.');
+
+      const apiOrderBy = SHOPEE_ORDER_BY[orderBy] || 'confirmed_sales.desc';
+      const queryParams = new URLSearchParams({
+        SPC_CDS: csrfToken,
+        SPC_CDS_VER: '2',
+        start_time: String(timeRange.startTime),
+        end_time: String(timeRange.endTime),
+        period: timeRange.period,
+        keyword: keyword || '',
+        category_type: categoryType || 'shopee',
+        category_id: String(categoryId ?? '-1'),
+        page_size: String(pageSize || 10),
+        page_num: String(pageNum || 1),
+        order_type: orderType || 'confirmed',
+        order_by: apiOrderBy,
+      });
+
+      const url = `${SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT}?${queryParams.toString()}`;
+      const response = await axios.get(url, {
+        headers: {
+          ...getShopeeHeaders(session.cookieString, csrfToken, session.userAgent),
+          Referer: 'https://seller.shopee.co.id/portal/datacenter/product/performance',
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      });
+
+      const envelope = response.data || {};
+      if (envelope.code !== 0 && envelope.code !== undefined && envelope.code !== null && envelope.code !== 200) {
+        throw new Error(envelope.message || envelope.msg || 'Shopee Product Performance API mengembalikan respons gagal.');
+      }
+
+      const dataContainer = envelope.data || envelope.result || {};
+      const rawList = Array.isArray(dataContainer.items)
+        ? dataContainer.items
+        : (Array.isArray(dataContainer.list)
+          ? dataContainer.list
+          : (Array.isArray(dataContainer.products) ? dataContainer.products : []));
+      const totalCount = asFiniteNumber(dataContainer.total ?? dataContainer.total_count ?? rawList.length);
+
+      const catalogProducts = await prisma.shopeeProduct.findMany({
+        where: { storeId: session.storeId },
+        select: { shopeeItemId: true, sku: true, price: true, imageUrl: true, name: true },
+      });
+      const catalogById = new Map(catalogProducts.map((product) => [String(product.shopeeItemId), product]));
+
+      const products = rawList.map((item, index) => {
+        const itemId = String(item.item_id ?? item.itemid ?? item.id ?? item.model_id ?? '');
+        const catalogProduct = catalogById.get(itemId);
+        const name = item.item_name || item.name || item.title || catalogProduct?.name || `Produk #${itemId}`;
+        let image = item.image || item.image_url || item.pic || '';
+        image = image || catalogProduct?.imageUrl || '';
+        if (image && !image.startsWith('http') && !image.startsWith('/')) {
+          image = `https://down-id.img.susercontent.com/file/${image}`;
+        }
+        const sku = item.sku || item.item_sku || item.parent_sku || catalogProduct?.sku || '';
+        const price = asFiniteNumber(item.price ?? item.current_price ?? item.item_price ?? catalogProduct?.price);
+
+        const confirmedSales = asFiniteNumber(item.confirmed_sales ?? item.sales ?? item.gmv ?? 0);
+        const confirmedOrders = asFiniteNumber(item.confirmed_order ?? item.confirmed_orders ?? item.orders ?? 0);
+        const confirmedUnits = asFiniteNumber(item.confirmed_units ?? item.units_sold ?? item.item_sold ?? 0);
+        const confirmedBuyers = asFiniteNumber(item.confirmed_buyers ?? item.buyers ?? 0);
+
+        const views = asFiniteNumber(item.pv ?? item.item_views ?? item.views ?? item.impressions ?? 0);
+        const visitors = asFiniteNumber(item.uv ?? item.item_uv ?? item.unique_visitors ?? 0);
+
+        const addToCartUnits = asFiniteNumber(item.add_to_cart_units ?? item.cart_units ?? 0);
+        const addToCartRate = normalizeRatePercent(item.add_to_cart_rate ?? item.uv_to_add_to_cart_rate, visitors > 0 ? (addToCartUnits / visitors) * 100 : 0);
+        const conversionRate = normalizeRatePercent(item.conversion_rate ?? item.confirmed_order_conversion_rate, visitors > 0 ? (confirmedOrders / visitors) * 100 : 0);
+        const bounceRate = normalizeRatePercent(item.bounce_rate, 0);
+
+        return {
+          rank: (Number(pageNum) - 1) * Number(pageSize) + (index + 1),
+          itemId,
+          name,
+          sku,
+          image,
+          price,
+          itemStatus: item.item_status || item.status || 'NORMAL',
+          confirmedSales,
+          confirmedOrders,
+          confirmedUnits,
+          confirmedBuyers,
+          views,
+          visitors,
+          addToCartUnits,
+          addToCartRate,
+          conversionRate,
+          bounceRate,
+          currency: 'IDR',
+          raw: item,
+        };
+      });
+
+      const rawSummary = dataContainer.summary || {};
+      const totalSales = asFiniteNumber(rawSummary.confirmed_sales ?? products.reduce((acc, item) => acc + item.confirmedSales, 0));
+      const totalOrders = asFiniteNumber(rawSummary.confirmed_order ?? products.reduce((acc, item) => acc + item.confirmedOrders, 0));
+      const totalUnits = asFiniteNumber(rawSummary.confirmed_units ?? products.reduce((acc, item) => acc + item.confirmedUnits, 0));
+      const totalViews = asFiniteNumber(rawSummary.item_views ?? products.reduce((acc, item) => acc + item.views, 0));
+      const totalVisitors = asFiniteNumber(rawSummary.item_uv ?? products.reduce((acc, item) => acc + item.visitors, 0));
+      const totalBuyers = asFiniteNumber(rawSummary.confirmed_buyers ?? products.reduce((acc, item) => acc + item.confirmedBuyers, 0));
+      const averageConversionRate = totalVisitors > 0
+        ? (totalOrders / totalVisitors) * 100
+        : normalizeRatePercent(rawSummary.conversion_rate, 0);
+
+      const parsedPageSize = Number(pageSize) || 10;
+      const parsedPageNum = Number(pageNum) || 1;
+
+      return {
+        success: true,
+        live: true,
+        isRealDataActive: true,
+        dataSource: 'SHOPEE_API',
+        storeName: session.storeName,
+        storeId: session.storeId,
+        period: timeRange.period,
+        startTime: timeRange.startTime,
+        endTime: timeRange.endTime,
+        total: totalCount,
+        products,
+        summary: {
+          totalSales,
+          totalOrders,
+          totalUnits,
+          totalViews,
+          totalVisitors,
+          totalBuyers,
+          averageConversionRate,
+        },
+        pagination: {
+          page: parsedPageNum,
+          pageSize: parsedPageSize,
+          total: totalCount,
+          totalPages: Math.ceil(totalCount / parsedPageSize) || 1,
+        },
+        message: null,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      console.warn('[Shopee Service] Product performance fetch failed.', { status, code: err.code, message: err.message });
+      return {
+        success: false,
+        live: false,
+        dataSource: 'EMPTY',
+        period: timeRange.period,
+        startTime: timeRange.startTime,
+        endTime: timeRange.endTime,
+        total: 0,
+        products: [],
+        summary: {
+          totalSales: 0,
+          totalOrders: 0,
+          totalUnits: 0,
+          totalViews: 0,
+          totalVisitors: 0,
+          totalBuyers: 0,
+          averageConversionRate: 0,
+        },
+        pagination: {
+          page: Number(pageNum),
+          pageSize: Number(pageSize),
+          total: 0,
+          totalPages: 0,
+        },
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi cookie. Silakan perbarui cookie Shopee di Pengaturan.'
+          : status ? `Shopee API mengembalikan status HTTP ${status}.` : 'Gagal terhubung ke Shopee Seller Center.',
       };
     }
   }

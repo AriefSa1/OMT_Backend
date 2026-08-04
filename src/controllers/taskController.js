@@ -7,7 +7,13 @@ async function listTasks(req, res) {
       taskService.list(req.query),
       snapshotService.getActionSnapshot(),
     ]);
-    return res.json({ success: true, tasks, recommendations: actionSnapshot.recommendations, sources: actionSnapshot.sources });
+    return res.json({
+      success: true,
+      tasks,
+      recommendations: actionSnapshot.recommendations,
+      recommendationTotal: actionSnapshot.recommendationTotal,
+      sources: actionSnapshot.sources,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: 'Tugas tidak dapat dimuat.' });
   }

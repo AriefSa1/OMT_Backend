@@ -110,7 +110,10 @@ async function updateProductEconomics(req, res) {
 }
 
 async function getShopeeAds(req, res) {
-  const snapshot = await snapshotService.getAdsSnapshot();
+  const snapshot = await snapshotService.getAdsSnapshot({
+    sortBy: req.query.sort_by,
+    direction: req.query.direction,
+  });
   return res.json({ success: true, ...snapshot, dataSource: snapshot.meta.source, dataAsOf: snapshot.meta.dataAsOf });
 }
 
@@ -129,6 +132,57 @@ async function validateCookie(req, res) {
   });
 }
 
+async function getProductPerformance(req, res) {
+  try {
+    const {
+      period = 'real_time',
+      start_time,
+      end_time,
+      keyword = '',
+      category_type = 'shopee',
+      category_id = '-1',
+      page_size = 10,
+      page_num = 1,
+      order_type = 'confirmed',
+      order_by = 'confirmed_sales.desc',
+    } = req.query;
+
+    const request = {
+      period,
+      startTime: start_time,
+      endTime: end_time,
+      keyword,
+      categoryType: category_type,
+      categoryId: category_id,
+      pageSize: Number(page_size) || 10,
+      pageNum: Number(page_num) || 1,
+      orderType: order_type,
+      orderBy: order_by,
+    };
+    const data = await shopeeService.fetchProductPerformance(request);
+    const shouldUseSnapshot = data.dataSource !== 'SHOPEE_API'
+      || !data.success
+      || (data.total > 0 && !data.products?.length);
+    if (shouldUseSnapshot) {
+      const snapshot = await snapshotService.getProductPerformanceSnapshot(request);
+      if (snapshot.total > 0) {
+        return res.json({
+          ...snapshot,
+          liveError: data.message || null,
+        });
+      }
+    }
+
+    return res.json(data);
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: 'Terjadi kesalahan saat memuat performa produk.',
+      details: err.message,
+    });
+  }
+}
+
 module.exports = {
   parseCookie,
   getSessionStatus,
@@ -136,6 +190,7 @@ module.exports = {
   getProductDetail,
   updateProductEconomics,
   getShopeeAds,
+  getProductPerformance,
   triggerSync,
   validateCookie,
 };

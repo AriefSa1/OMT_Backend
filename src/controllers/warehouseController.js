@@ -1,4 +1,5 @@
 const snapshotService = require('../services/snapshotService');
+const warehouseService = require('../services/warehouseService');
 const syncService = require('../services/syncService');
 
 async function getInventory(req, res) {
@@ -10,14 +11,49 @@ async function getInventory(req, res) {
       totalSkus: snapshot.totals.skus,
       totalPhysicalUnits: snapshot.totals.totalPhysicalUnits,
       totalAvailableUnits: snapshot.totals.totalAvailableUnits,
+      totalValuation: snapshot.totals.totalValuation,
       totals: snapshot.totals,
+      counts: snapshot.counts,
+      filters: snapshot.filters,
       pagination: snapshot.pagination,
       meta: snapshot.meta,
       dataSource: snapshot.meta.source,
       message: snapshot.meta.message,
     });
   } catch (err) {
+    console.error('[Warehouse Controller] getInventory error:', err);
     return res.status(500).json({ success: false, error: 'Snapshot gudang tidak dapat dimuat.' });
+  }
+}
+
+async function getProductDetail(req, res) {
+  try {
+    const sku = req.params.sku;
+    const detail = await warehouseService.getProductDetail(sku, {
+      warehouseId: req.query.warehouseId,
+      variantId: req.query.variantId,
+    });
+    return res.json({
+      success: true,
+      ...detail,
+    });
+  } catch (err) {
+    console.error('[Warehouse Controller] getProductDetail error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Detail produk tidak dapat dimuat.' });
+  }
+}
+
+async function getProductHistory(req, res) {
+  try {
+    const sku = req.params.sku;
+    const history = await warehouseService.getProductStockHistory(sku, req.query);
+    return res.json({
+      success: true,
+      ...history,
+    });
+  } catch (err) {
+    console.error('[Warehouse Controller] getProductHistory error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Riwayat stok produk tidak dapat dimuat.' });
   }
 }
 
@@ -46,4 +82,10 @@ async function triggerWarehouseSync(req, res) {
   return res.status(result.success ? 200 : 502).json(result);
 }
 
-module.exports = { getInventory, getReconciliation, triggerWarehouseSync };
+module.exports = {
+  getInventory,
+  getProductDetail,
+  getProductHistory,
+  getReconciliation,
+  triggerWarehouseSync,
+};

@@ -6,6 +6,7 @@ datasource db {
 
 generator client {
   provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client-active"
 }
 
 model User {
@@ -134,11 +135,16 @@ model ProductMetricSnapshot {
   productName          String
   category             String   @default("Uncategorized")
   impressions          Int      @default(0)
+  views                Int      @default(0)
+  visitors             Int      @default(0)
   clicks               Int      @default(0)
   ctr                  Float    @default(0)
   bounceRate           Float    @default(0)
   addToCartBuyers      Int      @default(0)
+  addToCartUnits       Int      @default(0)
   confirmedOrders      Int      @default(0)
+  confirmedUnits       Int      @default(0)
+  confirmedBuyers      Int      @default(0)
   confirmedSales       Float    @default(0)
   conversionRate       Float    @default(0)
   dataAsOf             DateTime @default(now())
@@ -149,18 +155,56 @@ model ProductMetricSnapshot {
   @@index([storeId, date])
 }
 
+model WarehouseLocation {
+  id          Int      @id
+  name        String
+  code        String?
+  ownerName   String?
+  ownerEmail  String?
+  teamId      Int?
+  racksCount  Int      @default(0)
+  racks       String?
+  lastUpdated DateTime @default(now())
+}
+
 model WarehouseItem {
-  id             String   @id @default(uuid())
-  sku            String   @unique
-  name           String
-  size           String
-  color          String
-  totalStock     Int
-  reservedStock  Int
-  availableStock Int
-  imageUrl       String?
-  location       String   @default("UNASSIGNED")
-  lastUpdated    DateTime @default(now())
+  id                String   @id @default(uuid())
+  sku               String
+  name              String
+  size              String
+  color             String
+  totalStock        Int
+  reservedStock     Int
+  availableStock    Int
+  imageUrl          String?
+  location          String   @default("UNASSIGNED")
+  warehouseId       Int?
+  warehouseName     String?
+  warehouseLocation String?
+  stockSource       String   @default("WAREHOUSE_API")
+  teamId            Int?
+  teamName          String?
+  teamCode          String?
+  productType       String   @default("general")
+  priceMin          Float?
+  priceMax          Float?
+  category          String?
+  refId             String?
+  desc              String?
+  bundleCount       Int?
+  isPriority        Boolean  @default(false)
+  isCrossLocked     Boolean  @default(false)
+  rawProductId      Int?
+  rawVariationId    Int?
+  lastUpdated       DateTime @default(now())
+
+  @@index([productType])
+  @@index([teamId])
+  @@index([warehouseId])
+  @@index([rawVariationId])
+  @@unique([sku, warehouseId])
+  @@index([sku, warehouseId])
+  @@index([rawVariationId, warehouseId])
 }
 
 model WarehouseStockSnapshot {
@@ -171,23 +215,55 @@ model WarehouseStockSnapshot {
   totalStock     Int      @default(0)
   reservedStock  Int      @default(0)
   availableStock Int      @default(0)
+  warehouseId   Int?
+  warehouseName  String?
+  teamId         Int?
+  teamName       String?
+  productType    String?  @default("general")
   source         String   @default("WAREHOUSE_API")
   dataAsOf       DateTime @default(now())
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  @@unique([sku, date])
+  @@unique([sku, warehouseId, date])
   @@index([date])
+  @@index([productType])
+  @@index([warehouseId])
+}
+
+model StockMovement {
+  id            String   @id @default(uuid())
+  sku           String
+  productId     Int?
+  productName   String
+  type          String   // IN, OUT, ADJUSTMENT
+  quantity      Int
+  previousStock Int?
+  currentStock  Int?
+  reference     String?
+  source        String   @default("PDC_GUDANG")
+  note          String?
+  warehouseId   Int?
+  warehouseName String?
+  timestamp     DateTime @default(now())
+
+  @@index([sku])
+  @@index([timestamp])
+  @@index([type])
 }
 
 model StockReconciliation {
   id             String   @id @default(uuid())
   sku            String
+  warehouseId    Int?
+  warehouseName  String?
   shopeeStock    Int
   warehouseStock Int
   variance       Int
   status         String   // MATCHED, DISCREPANCY, CRITICAL
   checkedAt      DateTime @default(now())
+
+  @@index([sku, warehouseId, checkedAt])
 }
 
 model SyncJobLog {
@@ -196,6 +272,15 @@ model SyncJobLog {
   status    String   // SUCCESS, DEGRADED, FAILED, RUNNING
   message   String
   timestamp DateTime @default(now())
+}
+
+model SyncRunLock {
+  key        String   @id
+  owner      String
+  acquiredAt DateTime
+  expiresAt  DateTime
+
+  @@index([expiresAt])
 }
 
 model SystemConfig {

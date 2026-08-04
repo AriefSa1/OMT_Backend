@@ -1,5 +1,10 @@
 const axios = require('axios');
 const prisma = require('../utils/prisma');
+const {
+  ACTIVE_WAREHOUSES,
+  ACTIVE_WAREHOUSE_ID_LIST,
+  isActiveWarehouseId,
+} = require('../constants/warehouseConstants');
 
 class WarehouseService {
   constructor() {
@@ -11,15 +16,40 @@ class WarehouseService {
     this.accessToken = '';
     this.tokenType = 'Bearer';
     this.tokenExpiresAt = 0;
+    this.teamId = null;
+    this.teamName = '';
+    this.userId = null;
+    this.warehousesMap = new Map();
+    this.teamsMap = new Map();
+    this.lastSyncStats = null;
+  }
+
+  async ensureConfigLoaded() {
+    if (this.isLoginConfigured()) return;
+    try {
+      const configs = await prisma.systemConfig.findMany();
+      const configMap = Object.fromEntries(configs.map((c) => [c.key, c.value]));
+      if (configMap.warehouseLoginUrl && configMap.warehouseUsername && configMap.warehousePassword) {
+        this.setWarehouseConfig({
+          loginUrl: configMap.warehouseLoginUrl,
+          inventoryUrl: configMap.warehouseInventoryUrl,
+          username: configMap.warehouseUsername,
+          password: configMap.warehousePassword,
+          loginFrom: configMap.warehouseLoginFrom,
+        });
+      }
+    } catch (err) {
+      console.warn('[Warehouse Service] Failed to load config from database:', err.message);
+    }
   }
 
   setWarehouseConfig({ loginUrl, inventoryUrl, username, password, loginFrom }) {
     const nextConfig = {
-      loginUrl: loginUrl || '',
-      inventoryUrl: inventoryUrl || '',
-      username: username || '',
-      password: password || '',
-      loginFrom: loginFrom || 'selling',
+      loginUrl: (loginUrl || '').trim(),
+      inventoryUrl: (inventoryUrl || '').trim(),
+      username: (username || '').trim(),
+      password: (password || '').trim(),
+      loginFrom: (loginFrom || 'selling').trim(),
     };
     const changed = Object.entries(nextConfig).some(([key, value]) => this[key] !== value);
 
@@ -29,13 +59,16 @@ class WarehouseService {
   }
 
   isLoginConfigured() {
-    return Boolean(this.loginUrl && this.inventoryUrl && this.username && this.password);
+    return Boolean(this.loginUrl && (this.inventoryUrl || this.loginUrl) && this.username && this.password);
   }
 
   clearAccessToken() {
     this.accessToken = '';
     this.tokenType = 'Bearer';
     this.tokenExpiresAt = 0;
+    this.teamId = null;
+    this.teamName = '';
+    this.userId = null;
   }
 
   extractLoginToken(payload, contentType = '') {
@@ -55,15 +88,34 @@ class WarehouseService {
       throw error;
     }
 
+    const inTeam = Array.isArray(data.in_team) && data.in_team.length > 0 ? data.in_team[0] : null;
+    const team = inTeam?.team || data.team || null;
+    const teamId = inTeam?.team_id || team?.id || data.team_id || null;
+    const teamName = team?.name || inTeam?.alias || '';
+    const user = data.user || null;
+    const userId = user?.id || inTeam?.user_id || null;
+
     return {
       token,
       tokenType: typeof data.token_type === 'string' ? data.token_type : 'Bearer',
       expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3600,
+      teamId,
+      teamName,
+      user,
+      userId,
     };
   }
 
-  async login() {
-    if (!this.isLoginConfigured()) {
+  async login(customCredentials = null) {
+    if (!customCredentials) {
+      await this.ensureConfigLoaded();
+    }
+    const loginUrl = customCredentials?.loginUrl || this.loginUrl;
+    const username = customCredentials?.username || this.username;
+    const password = customCredentials?.password || this.password;
+    const loginFrom = customCredentials?.loginFrom || this.loginFrom || 'selling';
+
+    if (!loginUrl || !username || !password) {
       const error = new Error('Warehouse login configuration is incomplete.');
       error.code = 'WAREHOUSE_LOGIN_NOT_CONFIGURED';
       throw error;
@@ -72,10 +124,10 @@ class WarehouseService {
     let response;
     try {
       response = await axios.post(
-        this.loginUrl,
-        { username: this.username, password: this.password, from: this.loginFrom },
+        loginUrl,
+        { username, password, from: loginFrom },
         {
-          timeout: 10000,
+          timeout: 15000,
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         }
       );
@@ -90,15 +142,64 @@ class WarehouseService {
       err.warehouseStage = 'LOGIN';
       throw err;
     }
-    this.accessToken = login.token;
-    this.tokenType = login.tokenType;
-    this.tokenExpiresAt = Date.now() + Math.max(login.expiresIn - 30, 30) * 1000;
-    return this.accessToken;
+
+    if (!customCredentials) {
+      this.accessToken = login.token;
+      this.tokenType = login.tokenType;
+      this.tokenExpiresAt = Date.now() + Math.max(login.expiresIn - 30, 30) * 1000;
+      this.teamId = login.teamId;
+      this.teamName = login.teamName;
+      this.userId = login.userId;
+      return this.accessToken;
+    }
+
+    return login;
+  }
+
+  async performLogin(customCredentials = null) {
+    await this.login(customCredentials);
+    return {
+      token: this.accessToken,
+      tokenType: this.tokenType,
+      teamId: this.teamId,
+      teamName: this.teamName,
+      userId: this.userId,
+    };
   }
 
   async getAccessToken() {
     if (this.accessToken && Date.now() < this.tokenExpiresAt) return this.accessToken;
     return this.login();
+  }
+
+  resolveInventoryUrl(url = this.inventoryUrl, overrideTeamId = null) {
+    let target = (url || '').trim();
+    if (!target) {
+      if (this.loginUrl) {
+        try {
+          const origin = new URL(this.loginUrl).origin;
+          target = `${origin}/v1/products/list`;
+        } catch {
+          target = 'https://pdcgudang.et.r.appspot.com/v1/products/list';
+        }
+      } else {
+        target = 'https://pdcgudang.et.r.appspot.com/v1/products/list';
+      }
+    }
+
+    try {
+      const parsed = new URL(target);
+      if (parsed.pathname === '/' || parsed.pathname === '' || parsed.pathname === '/v1' || parsed.pathname === '/v1/') {
+        parsed.pathname = '/v1/products/list';
+      }
+      const activeTeamId = overrideTeamId || this.teamId;
+      if (activeTeamId && !parsed.searchParams.has('team_id')) {
+        parsed.searchParams.set('team_id', String(activeTeamId));
+      }
+      return parsed.toString();
+    } catch {
+      return target;
+    }
   }
 
   toText(value, fallback = '') {
@@ -109,49 +210,71 @@ class WarehouseService {
     return text || fallback;
   }
 
+  formatCategory(category) {
+    if (!category) return 'General';
+    if (typeof category === 'string') {
+      const trimmed = category.trim();
+      return trimmed.startsWith('[object') || !trimmed ? 'General' : trimmed;
+    }
+    if (Array.isArray(category)) {
+      const names = category
+        .map((c) => {
+          if (!c) return '';
+          if (typeof c === 'string') return c.trim();
+          if (typeof c === 'object') return c.name || c.title || '';
+          return String(c);
+        })
+        .filter((n) => n && !n.startsWith('[object'));
+      return names.length > 0 ? names.join(' > ') : 'General';
+    }
+    if (typeof category === 'object') {
+      const name = category.name || category.title;
+      return name && !name.startsWith('[object') ? name : 'General';
+    }
+    return 'General';
+  }
+
   getFirstAssetId(...candidates) {
     for (const candidate of candidates) {
       const values = Array.isArray(candidate) ? candidate : [candidate];
       const assetId = values.find((value) => value !== undefined && value !== null && String(value).trim());
-      if (assetId !== undefined) return String(assetId).trim();
+      if (assetId !== undefined && assetId !== '') return String(assetId).trim();
     }
     return '';
   }
 
   getAssetThumbnailUrl(assetId) {
-    if (!assetId || !this.inventoryUrl) return null;
+    if (!assetId) return null;
+    const base = this.inventoryUrl || this.loginUrl || 'https://pdcgudang.et.r.appspot.com';
     try {
-      const url = new URL('/v1/assets/get', new URL(this.inventoryUrl).origin);
+      const origin = new URL(base).origin;
+      const url = new URL('/v1/assets/get', origin);
       url.search = new URLSearchParams({ id: assetId, thumbnail: 'true' }).toString();
       return url.toString();
     } catch {
-      return null;
+      return `https://pdcgudang.et.r.appspot.com/v1/assets/get?id=${assetId}&thumbnail=true`;
     }
   }
 
-  normalizeWarehouseItem(item) {
-    const variationName = this.toText(item.variation_name);
-    const assetId = this.getFirstAssetId(item.image, item.image_id, item.asset_id, item.product?.image, item.product?.image_id);
-    return {
-      sku: this.toText(item.sku || item.variation_sku || item.ref_id || item.id),
-      name: this.toText(item.name || item.productName || item.product?.name),
-      size: this.toText(item.size || (variationName === '_default' ? '' : variationName), '-'),
-      color: this.toText(item.color || item.variation_value, '-'),
-      totalStock: Number(item.totalStock ?? item.stock_total ?? item.stock_ready ?? item.stock ?? 0),
-      reservedStock: Number(item.reservedStock ?? item.stock_pending ?? 0),
-      availableStock: Number(item.availableStock ?? item.stock_ready ?? item.stock_total ?? item.stock ?? 0),
-      imageUrl: this.getAssetThumbnailUrl(assetId),
-      location: item.location || 'WH-MAIN',
-      lastUpdated: item.lastUpdated || new Date().toISOString(),
-    };
+  getAssetFullUrl(assetId) {
+    if (!assetId) return null;
+    const base = this.inventoryUrl || this.loginUrl || 'https://pdcgudang.et.r.appspot.com';
+    try {
+      const origin = new URL(base).origin;
+      const url = new URL('/v1/assets/get', origin);
+      url.search = new URLSearchParams({ id: assetId }).toString();
+      return url.toString();
+    } catch {
+      return `https://pdcgudang.et.r.appspot.com/v1/assets/get?id=${assetId}`;
+    }
   }
 
-  async fetchAuthenticatedData(url) {
+  async fetchAuthenticatedData(url, customToken = null) {
     const request = async () => {
-      const token = await this.getAccessToken();
+      const token = customToken || await this.getAccessToken();
       try {
         return await axios.get(url, {
-          timeout: 10000,
+          timeout: 15000,
           headers: {
             Accept: 'application/json',
             Authorization: `${this.tokenType} ${token}`,
@@ -169,118 +292,1071 @@ class WarehouseService {
       response = await request();
     } catch (err) {
       if (err.response?.status !== 401 && err.response?.status !== 403) throw err;
-      this.clearAccessToken();
+      if (!customToken) this.clearAccessToken();
       response = await request();
     }
 
     return response.data;
   }
 
-  async fetchFromWarehouseApi() {
-    const responseData = await this.fetchAuthenticatedData(this.inventoryUrl);
-
+  extractPayloadItems(responseData) {
     const payload = responseData?.data || responseData || {};
-    const items = Array.isArray(payload.items) ? payload.items : Array.isArray(payload) ? payload : null;
-    if (!Array.isArray(items)) return null;
-
-    return items.map((item) => this.normalizeWarehouseItem(item));
+    if (Array.isArray(payload.items)) return payload.items;
+    if (Array.isArray(payload.list)) return payload.list;
+    if (Array.isArray(payload.rows)) return payload.rows;
+    if (Array.isArray(payload.skus)) return payload.skus;
+    if (Array.isArray(payload.stock)) return payload.stock;
+    if (Array.isArray(payload.data)) return payload.data;
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') return [payload];
+    return [];
   }
 
-  async deriveFromShopeeProducts() {
-    const products = await prisma.shopeeProduct.findMany({ orderBy: { updatedAt: 'desc' } });
-    return products.map((product) =>
-      this.normalizeWarehouseItem({
-        sku: product.sku || product.shopeeItemId,
-        name: product.name,
-        stock: product.stock,
-        location: 'SHOPEE_BASELINE',
-      })
-    );
+  getWarehouseIdFromSkuEntry(entry) {
+    return entry?.gudang_id
+      ?? entry?.gudangId
+      ?? entry?.gudang?.id
+      ?? entry?.warehouse_id
+      ?? entry?.warehouseId
+      ?? entry?.warehouse?.id
+      ?? entry?.warehouse?.warehouse_id
+      ?? entry?.warehouse_location?.id
+      ?? entry?.warehouse_location?.warehouse_id
+      ?? entry?.warehouseLocation?.id
+      ?? entry?.rack?.warehouse_id
+      ?? entry?.rack?.warehouse?.id
+      ?? entry?.location?.warehouse_id
+      ?? entry?.location?.warehouse?.id
+      ?? null;
   }
 
-  async persistItems(items) {
-    if (!items.length) return;
+  getWarehouseNameFromSkuEntry(entry) {
+    return entry?.gudang_name
+      || entry?.gudangName
+      || entry?.gudang?.name
+      || entry?.warehouse_name
+      || entry?.warehouseName
+      || entry?.warehouse?.name
+      || entry?.warehouse_location?.name
+      || entry?.warehouseLocation?.name
+      || entry?.rack?.warehouse?.name
+      || entry?.location?.warehouse?.name
+      || null;
+  }
 
-    await prisma.$transaction(
-      items
-        .filter((item) => item.sku)
-        .map((item) =>
-          prisma.warehouseItem.upsert({
-            where: { sku: item.sku },
+  getWarehouseLocationFromSkuEntry(entry) {
+    return entry?.rack_name
+      || entry?.rackName
+      || entry?.rack?.name
+      || entry?.rack?.code
+      || entry?.location_name
+      || entry?.locationName
+      || entry?.location?.name
+      || entry?.location?.code
+      || entry?.warehouse_location
+      || entry?.warehouseLocation
+      || null;
+  }
+
+  getNumberFromObject(source, keys, fallback = 0) {
+    for (const key of keys) {
+      const value = source?.[key];
+      if (value !== undefined && value !== null && value !== '') {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+    }
+    return fallback;
+  }
+
+  hasObjectValue(source, keys) {
+    return keys.some((key) => source?.[key] !== undefined && source?.[key] !== null && source?.[key] !== '');
+  }
+
+  normalizeVariantSkuEntry(entry, { variantId, warehouseId, fallbackWarehouse = null, items = [] } = {}) {
+    const resolvedWarehouseId = this.getWarehouseIdFromSkuEntry(entry) || warehouseId || fallbackWarehouse?.id || null;
+    const readyStockKeys = [
+      'stock_ready',
+      'stockReady',
+      'available_stock',
+      'availableStock',
+      'stock_available',
+      'qty_ready',
+      'ready_qty',
+      'quantity',
+      'qty',
+      'stock',
+    ];
+    const pendingStockKeys = [
+      'stock_pending',
+      'reserved_stock',
+      'reservedStock',
+      'booked_stock',
+      'hold_stock',
+      'pending_qty',
+    ];
+    const totalStockKeys = [
+      'stock_total',
+      'totalStock',
+      'total_stock',
+      'physical_stock',
+      'stock_physical',
+    ];
+    const stockReady = this.getNumberFromObject(entry, readyStockKeys);
+    const stockPending = this.getNumberFromObject(entry, pendingStockKeys);
+    const reportedStockTotal = this.getNumberFromObject(entry, totalStockKeys);
+    const stockTotal = this.hasObjectValue(entry, readyStockKeys) || this.hasObjectValue(entry, pendingStockKeys)
+      ? stockReady + stockPending
+      : reportedStockTotal;
+
+    return {
+      variantId: Number(variantId) || variantId,
+      warehouseId: Number(resolvedWarehouseId) || resolvedWarehouseId,
+      warehouseName: this.getWarehouseNameFromSkuEntry(entry) || fallbackWarehouse?.name || null,
+      warehouseLocation: this.getWarehouseLocationFromSkuEntry(entry) || null,
+      sku: this.toText(entry?.sku || entry?.ref_id || entry?.refId || entry?.variation_sku),
+      availableStock: stockReady,
+      reservedStock: stockPending,
+      totalStock: stockTotal,
+      raw: entry,
+      items,
+    };
+  }
+
+  async getWarehouseOptionList() {
+    return ACTIVE_WAREHOUSES.map((warehouse) => ({ id: warehouse.id, name: warehouse.name }));
+  }
+
+  async buildWarehouseStockOptions(items = []) {
+    const warehouses = await this.getWarehouseOptionList();
+    const stockByWarehouse = new Map();
+
+    for (const entry of items) {
+      const normalized = this.normalizeVariantSkuEntry(entry, { items: [] });
+      if (!normalized.warehouseId) continue;
+
+      const key = String(normalized.warehouseId);
+      const existing = stockByWarehouse.get(key);
+      if (existing) {
+        existing.availableStock += normalized.availableStock || 0;
+        existing.reservedStock += normalized.reservedStock || 0;
+        existing.totalStock += normalized.totalStock || 0;
+      } else {
+        stockByWarehouse.set(key, {
+          warehouseId: normalized.warehouseId,
+          warehouseName: normalized.warehouseName || `Gudang #${normalized.warehouseId}`,
+          availableStock: normalized.availableStock || 0,
+          reservedStock: normalized.reservedStock || 0,
+          totalStock: normalized.totalStock || 0,
+        });
+      }
+    }
+
+    const options = warehouses.map((warehouse) => {
+      const stock = stockByWarehouse.get(String(warehouse.id));
+      const totalStock = stock?.totalStock || 0;
+      return {
+        warehouseId: warehouse.id,
+        warehouseName: stock?.warehouseName || warehouse.name || `Gudang #${warehouse.id}`,
+        availableStock: stock?.availableStock || 0,
+        reservedStock: stock?.reservedStock || 0,
+        totalStock,
+        disabled: totalStock <= 0,
+      };
+    });
+
+    return options;
+  }
+
+  async getWarehouseLocationById(warehouseId) {
+    if (!warehouseId) return null;
+    const numericId = Number(warehouseId);
+    if (!Number.isFinite(numericId)) return null;
+
+    const cached = this.warehousesMap.get(numericId);
+    if (cached) return { id: numericId, name: cached.name || `Gudang #${numericId}` };
+
+    try {
+      return await prisma.warehouseLocation.findUnique({ where: { id: numericId } });
+    } catch {
+      return null;
+    }
+  }
+
+  async discoverVariantIdBySku({ sku, item = null } = {}) {
+    const candidates = [
+      sku,
+      item?.sku,
+      item?.refId,
+      item?.name,
+    ].map((value) => this.toText(value)).filter(Boolean);
+
+    if (!candidates.length) return null;
+
+    await this.getAccessToken();
+    const baseUrl = this.resolveInventoryUrl(this.inventoryUrl);
+
+    for (const candidate of candidates) {
+      for (const searchParam of ['ref_id', 'sku', 'search', 'keyword', 'q']) {
+        let targetUrl;
+        try {
+          targetUrl = new URL(baseUrl);
+          targetUrl.searchParams.set(searchParam, candidate);
+          targetUrl.searchParams.set('limit', '20');
+          targetUrl.searchParams.set('page', '1');
+        } catch {
+          continue;
+        }
+
+        try {
+          const responseData = await this.fetchAuthenticatedData(targetUrl.toString());
+          const products = this.extractPayloadItems(responseData);
+          for (const product of products) {
+            const variations = Array.isArray(product?.variation_values) ? product.variation_values : [];
+            for (const variation of variations) {
+              const refs = [
+                variation?.ref_id,
+                variation?.sku,
+                variation?.variation_sku,
+                variation?.id,
+              ].map((value) => this.toText(value)).filter(Boolean);
+              if (refs.some((ref) => candidates.includes(ref))) {
+                return variation.id || variation.variant_id || variation.variantId || null;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('[Warehouse Service] Failed to discover variant id:', err.message);
+          return null;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  async fetchVariantSkuDetail({ variantId, warehouseId } = {}) {
+    if (!variantId) return null;
+
+    const items = await this.fetchVariantSkuEntries(variantId);
+    const [fallbackWarehouse, warehouseStockOptions] = await Promise.all([
+      this.getWarehouseLocationById(warehouseId),
+      this.buildWarehouseStockOptions(items),
+    ]);
+    const selected = warehouseId
+      ? isActiveWarehouseId(warehouseId)
+        ? items.find((entry) => String(this.getWarehouseIdFromSkuEntry(entry) || '') === String(warehouseId))
+        : null
+      : items.find((entry) => isActiveWarehouseId(this.getWarehouseIdFromSkuEntry(entry))) || null;
+
+    if (!selected) {
+      const emptyEntry = {};
+      return {
+        ...this.normalizeVariantSkuEntry(emptyEntry, { variantId, warehouseId, fallbackWarehouse, items }),
+        availableStock: 0,
+        reservedStock: 0,
+        totalStock: 0,
+        noWarehouseMatch: Boolean(warehouseId),
+        warehouseStockOptions,
+        raw: items,
+      };
+    }
+
+    return {
+      ...this.normalizeVariantSkuEntry(selected, { variantId, warehouseId, fallbackWarehouse, items }),
+      warehouseStockOptions,
+    };
+  }
+
+  async fetchVariantSkuEntries(variantId) {
+    if (!variantId) return [];
+
+    await this.getAccessToken();
+    let origin = 'https://pdcgudang.et.r.appspot.com';
+    try {
+      origin = new URL(this.inventoryUrl || this.loginUrl || origin).origin;
+    } catch {}
+
+    const url = new URL('/v1/products/variants/list_sku', origin);
+    url.searchParams.set('variant_id', String(variantId));
+    const responseData = await this.fetchAuthenticatedData(url.toString());
+    return this.extractPayloadItems(responseData);
+  }
+
+  async fetchWarehousesList() {
+    try {
+      const origin = new URL(this.loginUrl || 'https://pdcgudang.et.r.appspot.com').origin;
+      const url = `${origin}/v1/warehouses/list`;
+      const res = await this.fetchAuthenticatedData(url);
+      const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
+
+      for (const wh of list) {
+        if (wh.id) {
+          this.warehousesMap.set(wh.id, wh);
+          await prisma.warehouseLocation.upsert({
+            where: { id: wh.id },
             update: {
-              name: item.name,
-              size: item.size,
-              color: item.color,
-              totalStock: item.totalStock,
-              reservedStock: item.reservedStock,
-              availableStock: item.availableStock,
-              imageUrl: item.imageUrl,
-              location: item.location,
+              name: wh.name || `Gudang #${wh.id}`,
+              code: wh.code || null,
+              ownerName: wh.user_owner?.name || null,
+              ownerEmail: wh.user_owner?.email || null,
+              teamId: wh.team_id || null,
+              racksCount: Array.isArray(wh.racks) ? wh.racks.length : 0,
+              racks: Array.isArray(wh.racks) ? JSON.stringify(wh.racks) : null,
               lastUpdated: new Date(),
             },
             create: {
-              sku: item.sku,
-              name: item.name,
-              size: item.size,
-              color: item.color,
-              totalStock: item.totalStock,
-              reservedStock: item.reservedStock,
-              availableStock: item.availableStock,
-              imageUrl: item.imageUrl,
-              location: item.location,
+              id: wh.id,
+              name: wh.name || `Gudang #${wh.id}`,
+              code: wh.code || null,
+              ownerName: wh.user_owner?.name || null,
+              ownerEmail: wh.user_owner?.email || null,
+              teamId: wh.team_id || null,
+              racksCount: Array.isArray(wh.racks) ? wh.racks.length : 0,
+              racks: Array.isArray(wh.racks) ? JSON.stringify(wh.racks) : null,
             },
-          })
-        )
+          });
+        }
+      }
+      return list;
+    } catch (err) {
+      console.warn('[Warehouse Service] Failed to fetch warehouses list:', err.message);
+      return [];
+    }
+  }
+
+  async fetchTeamsMap() {
+    try {
+      const origin = new URL(this.loginUrl || 'https://pdcgudang.et.r.appspot.com').origin;
+      const url = `${origin}/v1/teams/list?limit=200`;
+      const res = await this.fetchAuthenticatedData(url);
+      const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
+
+      for (const t of list) {
+        if (t.id) {
+          this.teamsMap.set(t.id, t);
+        }
+      }
+      return this.teamsMap;
+    } catch (err) {
+      console.warn('[Warehouse Service] Failed to fetch teams list:', err.message);
+      return this.teamsMap;
+    }
+  }
+
+  determineProductType(prod, team = null) {
+    if (Boolean(prod?.priority || prod?.isPriority || prod?.is_priority)) {
+      return 'priority';
+    }
+
+    const ref = String(prod?.ref_id || prod?.sku || '').toUpperCase();
+    const name = String(prod?.name || prod?.productName || '').toUpperCase();
+    const teamCode = String(team?.team_code || '');
+    const teamName = String(team?.name || '').toLowerCase();
+
+    const isResearch =
+      teamCode === '00' ||
+      teamName.includes('internal') ||
+      teamName.includes('riset') ||
+      teamName.includes('research') ||
+      Boolean(prod?.cross_locked || prod?.isCrossLocked) ||
+      ref.startsWith('RS-') ||
+      ref.startsWith('RSC-') ||
+      ref.includes('RISET') ||
+      name.includes('RISET');
+
+    if (isResearch) {
+      return 'research';
+    }
+
+    return 'general';
+  }
+
+  determineProductWarehouse(prod, team = null) {
+    const teamId = prod?.team_id || team?.id;
+
+    // Physical warehouse allocation mapping based on PDC Gudang inventory infrastructure
+    if (teamId === 40) {
+      return { warehouseId: 39, warehouseName: 'Pdc Srengat', warehouseLocation: 'Rak T26-Rak' };
+    }
+    if (teamId === 88 || teamId === 1) {
+      return { warehouseId: 94, warehouseName: 'Palem Warehouse', warehouseLocation: 'Rak 8804A1' };
+    }
+    if (teamId === 67) {
+      return { warehouseId: 67, warehouseName: 'Febri Warehouse', warehouseLocation: 'Rak 67-A1' };
+    }
+    if (teamId === 92) {
+      return { warehouseId: 92, warehouseName: 'LGIS Warehouse', warehouseLocation: 'Rak LGIS-B1' };
+    }
+    if (teamId === 96) {
+      return { warehouseId: 96, warehouseName: 'Cemara Warehouse', warehouseLocation: 'Rak CM-01' };
+    }
+
+    // Default primary warehouse center
+    const rackCode = team?.team_code ? `Rak ${team.team_code}01A1` : 'PDC Center';
+    return { warehouseId: 38, warehouseName: 'PDC Warehouse (Center)', warehouseLocation: rackCode };
+  }
+
+  async fetchRecentStockOutOrders(teamId = null) {
+    try {
+      const activeTeamId = teamId || this.teamId || 63;
+      const origin = new URL(this.loginUrl || 'https://pdcgudang.et.r.appspot.com').origin;
+      const url = `${origin}/v1/orders/list?team_id=${activeTeamId}&limit=50`;
+      const res = await this.fetchAuthenticatedData(url);
+      const orders = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
+
+      let insertedCount = 0;
+      for (const ord of orders) {
+        const orderRef = this.toText(ord.ref_id || ord.id || ord.tracking_number, `ORD-${ord.id}`);
+        const mpSource = ord.order_mp?.mp_type ? ord.order_mp.mp_type.toUpperCase() : 'PDC_ORDER';
+        const orderDate = ord.timestamp?.[0]?.timestamp || ord.created ? new Date(ord.timestamp?.[0]?.timestamp || ord.created) : new Date();
+
+        if (Array.isArray(ord.order_items)) {
+          for (const item of ord.order_items) {
+            const sku = this.toText(item.ref_id || item.sku || (item.variation_values && item.variation_values[0]?.ref_id) || item.product?.ref_id || item.id);
+            const qty = Number(item.count || item.quantity || 1);
+            const productName = this.toText(item.name || item.product?.name, 'Produk Gudang');
+
+            if (sku) {
+              const existing = await prisma.stockMovement.findFirst({
+                where: { sku, reference: orderRef, type: 'OUT' },
+              });
+              if (!existing) {
+                await prisma.stockMovement.create({
+                  data: {
+                    sku,
+                    productId: item.product_id || item.product?.id || null,
+                    productName,
+                    type: 'OUT',
+                    quantity: qty,
+                    reference: orderRef,
+                    source: mpSource,
+                    note: `Pesanan keluar status: ${ord.order_status || 'PROCESSED'}`,
+                    warehouseId: 38,
+                    warehouseName: 'PDC Warehouse (Center)',
+                    timestamp: orderDate,
+                  },
+                });
+                insertedCount++;
+              }
+            }
+          }
+        }
+      }
+      return insertedCount;
+    } catch (err) {
+      console.warn('[Warehouse Service] Failed to fetch outbound order movements:', err.message);
+      return 0;
+    }
+  }
+
+  async mapWithConcurrency(values, concurrency, handler) {
+    const results = new Array(values.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= values.length) return;
+        results[index] = await handler(values[index], index);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, values.length || 1) }, worker));
+    return results;
+  }
+
+  async fetchFromWarehouseApi({ maxPages = 100, limit = 500 } = {}) {
+    await this.getAccessToken();
+    await Promise.allSettled([this.fetchWarehousesList(), this.fetchTeamsMap()]);
+
+    const resolvedUrl = this.resolveInventoryUrl(this.inventoryUrl);
+    if (!resolvedUrl) return null;
+
+    const firstUrl = new URL(resolvedUrl);
+    firstUrl.searchParams.set('limit', String(limit));
+    firstUrl.searchParams.set('page', '1');
+    const firstResponse = await this.fetchAuthenticatedData(firstUrl.toString());
+    const allProducts = this.extractPayloadItems(firstResponse);
+    const pageInfo = firstResponse?.page_info || firstResponse?.data?.page_info || {};
+    const totalPages = Math.min(
+      Number(pageInfo.total_pages || pageInfo.total_page || pageInfo.totalPages) || 1,
+      maxPages
     );
+
+    if (totalPages > 1) {
+      const pages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
+      const pageResults = await this.mapWithConcurrency(pages, 10, async (page) => {
+        const pageUrl = new URL(resolvedUrl);
+        pageUrl.searchParams.set('limit', String(limit));
+        pageUrl.searchParams.set('page', String(page));
+        try {
+          return this.extractPayloadItems(await this.fetchAuthenticatedData(pageUrl.toString()));
+        } catch (err) {
+          console.warn(`[Warehouse Service] Failed to fetch product page ${page}:`, err.message);
+          throw err;
+        }
+      });
+      allProducts.push(...pageResults.flat());
+    }
+
+    const records = [];
+    for (const prod of allProducts) {
+      const variations = Array.isArray(prod?.variation_values) && prod.variation_values.length
+        ? prod.variation_values
+        : [null];
+      const prodAssetId = this.getFirstAssetId(prod?.image, prod?.image_id, prod?.asset_id);
+      const teamId = prod?.team_id || this.teamId;
+      const teamObj = this.teamsMap.get(teamId) || (this.teamId === teamId ? { id: this.teamId, name: this.teamName } : null);
+      const teamName = teamObj?.name || (teamId ? `Team ${teamId}` : 'Team 94');
+      const teamCode = teamObj?.team_code || null;
+      const productType = this.determineProductType(prod, teamObj);
+      const fallbackWarehouse = this.determineProductWarehouse(prod, teamObj);
+      const priceMin = Number(prod?.price_min || prod?.price || 0);
+      const priceMax = Number(prod?.price_max || prod?.price || priceMin);
+      const category = this.formatCategory(prod?.category || prod?.category_name);
+      const refId = this.toText(prod?.ref_id);
+      const desc = this.toText(prod?.desc || prod?.description);
+      const bundleCount = Number(prod?.bundle_count || 0);
+      const isPriority = Boolean(prod?.priority || prod?.isPriority || productType === 'priority');
+      const isCrossLocked = Boolean(prod?.cross_locked || prod?.isCrossLocked);
+
+      for (const variation of variations) {
+        const varName = this.toText(variation?.variation_name);
+        const varVal = this.toText(variation?.variation_value);
+        const varAssetId = this.getFirstAssetId(variation?.image, variation?.image_id, variation?.asset_id) || prodAssetId;
+        const rawVariationId = variation?.id || variation?.variant_id || variation?.variantId || (!variation ? prod?.id : null);
+        const sku = this.toText(variation?.ref_id || variation?.sku || prod?.ref_id || variation?.id || prod?.id);
+        if (!sku) continue;
+
+        records.push({
+          product: prod,
+          variation,
+          variantId: rawVariationId,
+          sku,
+          name: this.toText(prod?.name || prod?.productName, 'Produk Gudang'),
+          size: varName && varName !== '_default' ? `${varName}: ${varVal}` : varVal || '-',
+          color: '-',
+          imageUrl: this.getAssetThumbnailUrl(varAssetId),
+          teamId,
+          teamName,
+          teamCode,
+          productType,
+          priceMin: Number(variation?.price_min || variation?.price || priceMin),
+          priceMax: Number(variation?.price_max || variation?.price || priceMax || priceMin),
+          category,
+          refId: this.toText(variation?.ref_id || refId),
+          desc,
+          bundleCount: Number(variation?.bundle_count ?? bundleCount),
+          isPriority,
+          isCrossLocked,
+          rawProductId: Number(prod?.id) || null,
+          fallbackWarehouse,
+          catalogAvailableStock: Number(variation?.stock_ready ?? prod?.stock_ready ?? 0),
+          catalogReservedStock: Number(variation?.stock_pending ?? prod?.stock_pending ?? 0),
+        });
+      }
+    }
+
+    const uniqueRecords = Array.from(new Map(
+      records.filter((record) => record.variantId).map((record) => [String(record.variantId), record])
+    ).values());
+    const recordsWithoutVariant = records.filter((record) => !record.variantId);
+    const concurrency = Math.max(1, Number(process.env.WAREHOUSE_VARIANT_SYNC_CONCURRENCY) || 8);
+    const results = await this.mapWithConcurrency(uniqueRecords, concurrency, async (record) => {
+      try {
+        const entries = await this.fetchVariantSkuEntries(record.variantId);
+        const grouped = new Map();
+        for (const entry of entries) {
+          const warehouseId = Number(this.getWarehouseIdFromSkuEntry(entry));
+          if (!isActiveWarehouseId(warehouseId)) continue;
+          const warehouse = ACTIVE_WAREHOUSES.find((candidate) => candidate.id === warehouseId);
+          const normalized = this.normalizeVariantSkuEntry(entry, { variantId: record.variantId, warehouseId, fallbackWarehouse: warehouse });
+          const sku = normalized.sku || record.sku;
+          const key = `${sku}:${warehouseId}`;
+          const existing = grouped.get(key);
+          if (existing) {
+            existing.availableStock += normalized.availableStock;
+            existing.reservedStock += normalized.reservedStock;
+            existing.totalStock += normalized.totalStock;
+          } else {
+            grouped.set(key, {
+              ...record,
+              sku,
+              warehouseId,
+              warehouseName: warehouse.name,
+              warehouseLocation: null,
+              location: warehouse.name,
+              availableStock: normalized.availableStock,
+              reservedStock: normalized.reservedStock,
+              totalStock: normalized.totalStock,
+              stockSource: 'PDC_VARIANT_API',
+              rawVariationId: Number(record.variantId) || null,
+              lastUpdated: new Date().toISOString(),
+            });
+          }
+        }
+
+        if (grouped.size) return { items: Array.from(grouped.values()), unresolved: false };
+
+        const fallbackWarehouse = record.fallbackWarehouse;
+        if (fallbackWarehouse && isActiveWarehouseId(fallbackWarehouse.warehouseId)) {
+          const totalStock = record.catalogAvailableStock + record.catalogReservedStock;
+          return {
+            items: [{
+              ...record,
+              warehouseId: fallbackWarehouse.warehouseId,
+              warehouseName: ACTIVE_WAREHOUSES.find((warehouse) => warehouse.id === fallbackWarehouse.warehouseId)?.name || fallbackWarehouse.warehouseName,
+              warehouseLocation: null,
+              location: fallbackWarehouse.warehouseName,
+              availableStock: record.catalogAvailableStock,
+              reservedStock: record.catalogReservedStock,
+              totalStock,
+              stockSource: 'TEAM_MAPPING_FALLBACK',
+              rawVariationId: Number(record.variantId) || null,
+              lastUpdated: new Date().toISOString(),
+            }],
+            unresolved: true,
+          };
+        }
+        return { items: [], unresolved: true };
+      } catch (error) {
+        return { error, items: [], unresolved: false };
+      }
+    });
+
+    const fallbackResults = recordsWithoutVariant.map((record) => {
+      const fallbackWarehouse = record.fallbackWarehouse;
+      if (!fallbackWarehouse || !isActiveWarehouseId(fallbackWarehouse.warehouseId)) {
+        return { items: [], unresolved: true };
+      }
+      const totalStock = record.catalogAvailableStock + record.catalogReservedStock;
+      return {
+        items: [{
+          ...record,
+          warehouseId: fallbackWarehouse.warehouseId,
+          warehouseName: ACTIVE_WAREHOUSES.find((warehouse) => warehouse.id === fallbackWarehouse.warehouseId)?.name || fallbackWarehouse.warehouseName,
+          warehouseLocation: null,
+          location: fallbackWarehouse.warehouseName,
+          availableStock: record.catalogAvailableStock,
+          reservedStock: record.catalogReservedStock,
+          totalStock,
+          stockSource: 'TEAM_MAPPING_FALLBACK',
+          rawVariationId: null,
+          lastUpdated: new Date().toISOString(),
+        }],
+        unresolved: true,
+      };
+    });
+    const allResults = [...results, ...fallbackResults];
+
+    const failed = allResults.filter((result) => result.error);
+    if (failed.length) {
+      const error = new Error(`${failed.length} varian gagal diambil dari endpoint list_sku.`);
+      error.syncStats = { failedVariantCount: failed.length, variantCount: uniqueRecords.length };
+      throw error;
+    }
+
+    const items = allResults.flatMap((result) => result.items || []);
+    const syncStats = {
+      catalogProductCount: allProducts.length,
+      variantCount: uniqueRecords.length,
+      persistedCandidateCount: items.length,
+      unresolvedVariantCount: allResults.filter((result) => result.unresolved).length,
+      failedVariantCount: 0,
+      activeWarehouseCounts: Object.fromEntries(ACTIVE_WAREHOUSES.map((warehouse) => [warehouse.id, items.filter((item) => item.warehouseId === warehouse.id).length])),
+    };
+
+    this.fetchRecentStockOutOrders(this.teamId).catch((err) => {
+      console.warn('[Warehouse Service] Background outbound sync error:', err.message);
+    });
+
+    return { items, complete: true, syncStats };
+  }
+
+  async testConnection(customConfig = null) {
+    try {
+      const loginResult = await this.performLogin(customConfig);
+      const token = loginResult.token;
+      const teamId = loginResult.teamId || this.teamId;
+      const teamName = loginResult.teamName || this.teamName;
+      const user = loginResult.user || null;
+
+      const inventoryUrlInput = customConfig?.inventoryUrl || this.inventoryUrl;
+      const resolvedInventoryUrl = this.resolveInventoryUrl(inventoryUrlInput, teamId);
+
+      const targetUrlObj = new URL(resolvedInventoryUrl);
+      if (!targetUrlObj.searchParams.has('limit')) targetUrlObj.searchParams.set('limit', '10');
+      if (!targetUrlObj.searchParams.has('page')) targetUrlObj.searchParams.set('page', '1');
+
+      const invRes = await this.fetchAuthenticatedData(targetUrlObj.toString(), token);
+      const totalItems = invRes?.page_info?.total_items || (Array.isArray(invRes?.data) ? invRes.data.length : 0);
+      const previewCount = Array.isArray(invRes?.data) ? invRes.data.length : 0;
+
+      return {
+        success: true,
+        message: `Koneksi berhasil! Terhubung sebagai ${user?.name || user?.username || 'User'} (${teamName || `Team ID: ${teamId}`}). Total ${totalItems.toLocaleString('id-ID')} item terdeteksi di gudang.`,
+        team: { id: teamId, name: teamName },
+        user: { id: user?.id, name: user?.name, username: user?.username },
+        totalWarehouseItems: totalItems,
+        previewItemsCount: previewCount,
+        resolvedInventoryUrl,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      const stage = err.warehouseStage === 'LOGIN' ? 'login' : 'inventori';
+      let message = err.message;
+      if (err.code === 'WAREHOUSE_LOGIN_HTML_RESPONSE') {
+        message = 'URL login mengembalikan halaman HTML. Pastikan URL login mengarah ke endpoint API /v1/users/login.';
+      } else if (err.code === 'WAREHOUSE_TOKEN_MISSING') {
+        message = 'Login berhasil tetapi token otorisasi tidak ditemukan pada respons.';
+      } else if (status === 401 || status === 403) {
+        message = `Otentikasi gagal (HTTP ${status}). Periksa kembali username, password, atau asal login (selling).`;
+      } else if (status === 404) {
+        message = `Endpoint ${stage} tidak ditemukan (HTTP 404). Periksa kembali URL yang dimasukkan.`;
+      } else if (err.response?.data?.err_msg) {
+        message = `Server gudang: ${err.response.data.err_msg}`;
+      } else if (err.response?.data?.message) {
+        message = `Server gudang: ${err.response.data.message}`;
+      }
+      return {
+        success: false,
+        error: message,
+        message,
+        stage,
+      };
+    }
+  }
+
+  async persistItems(items) {
+    const uniqueItemsMap = new Map();
+    for (const item of items || []) {
+      const warehouseId = Number(item?.warehouseId);
+      if (!item?.sku || !isActiveWarehouseId(warehouseId)) continue;
+      uniqueItemsMap.set(`${item.sku}:${warehouseId}`, { ...item, warehouseId });
+    }
+    const uniqueItems = Array.from(uniqueItemsMap.values());
+
+    const now = new Date();
+    const dataToInsert = uniqueItems.map((item) => ({
+      sku: item.sku,
+      name: item.name || 'Produk Gudang',
+      size: item.size || '-',
+      color: item.color || '-',
+      totalStock: Number(item.totalStock || 0),
+      reservedStock: Number(item.reservedStock || 0),
+      availableStock: Number(item.availableStock || 0),
+      imageUrl: item.imageUrl || null,
+      location: item.location || item.warehouseName || 'PDC-GUDANG',
+      warehouseId: item.warehouseId,
+      warehouseName: item.warehouseName || ACTIVE_WAREHOUSES.find((warehouse) => warehouse.id === item.warehouseId)?.name || null,
+      warehouseLocation: item.warehouseLocation || null,
+      stockSource: item.stockSource || 'WAREHOUSE_API',
+      teamId: item.teamId || null,
+      teamName: item.teamName || null,
+      teamCode: item.teamCode || null,
+      productType: item.productType || 'general',
+      priceMin: Number(item.priceMin || 0),
+      priceMax: Number(item.priceMax || 0),
+      category: item.category || 'General',
+      refId: item.refId || null,
+      desc: item.desc || null,
+      bundleCount: Number(item.bundleCount || 0),
+      isPriority: Boolean(item.isPriority),
+      isCrossLocked: Boolean(item.isCrossLocked),
+      rawProductId: item.rawProductId || null,
+      rawVariationId: item.rawVariationId || null,
+      lastUpdated: now,
+    }));
+
+    await prisma.$transaction(async (tx) => {
+      await tx.warehouseItem.deleteMany({ where: { warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST } } });
+      const chunkSize = 500;
+      for (let i = 0; i < dataToInsert.length; i += chunkSize) {
+        await tx.warehouseItem.createMany({ data: dataToInsert.slice(i, i + chunkSize) });
+      }
+    }, { maxWait: 30000, timeout: 180000 });
+
+    return {
+      count: dataToInsert.length,
+      warehouseCounts: Object.fromEntries(
+        ACTIVE_WAREHOUSES.map((warehouse) => [warehouse.id, dataToInsert.filter((item) => item.warehouseId === warehouse.id).length])
+      ),
+    };
   }
 
   async getInventoryLevels() {
+    await this.ensureConfigLoaded();
+    this.lastSyncStats = null;
     let items = [];
-    let source = 'SHOPEE_BASELINE';
+    let source = 'NONE';
     let warehouseApiMessage = '';
     const loginConfigured = this.isLoginConfigured();
 
     if (loginConfigured) {
       try {
-        const apiItems = await this.fetchFromWarehouseApi();
-        if (apiItems) {
-          items = apiItems;
+        // Also ensure warehouse locations are refreshed
+        await this.fetchWarehousesList().catch((e) => console.warn('[Warehouse Service] Location sync warning:', e.message));
+
+        const apiResult = await this.fetchFromWarehouseApi({ maxPages: 100, limit: 500 });
+        if (apiResult?.complete) {
+          items = apiResult.items || [];
           source = 'WAREHOUSE_API';
+          const persisted = await this.persistItems(items);
+          this.lastSyncStats = { ...(apiResult.syncStats || {}), ...persisted };
         } else {
-          warehouseApiMessage = 'The Warehouse inventory endpoint returned no usable inventory data.';
+          warehouseApiMessage = 'Endpoint inventori PDC Gudang tidak mengembalikan data stok produk.';
         }
       } catch (err) {
+        items = [];
+        source = 'NONE';
+        this.lastSyncStats = null;
         const status = err.response?.status;
         const code = err.code;
         const stage = err.warehouseStage === 'LOGIN' ? 'login' : 'inventory';
-        console.warn('[Warehouse Service] Authenticated Warehouse API unavailable.', { status, code });
+        console.warn('[Warehouse Service] Authenticated Warehouse API unavailable.', { status, code, message: err.message });
         warehouseApiMessage = code === 'WAREHOUSE_LOGIN_HTML_RESPONSE'
-          ? 'The configured Warehouse login URL returned an HTML page, not an API access token.'
+          ? 'URL login mengembalikan HTML bukan token API.'
           : code === 'WAREHOUSE_TOKEN_MISSING'
-            ? 'Warehouse login succeeded but did not return a supported access-token field.'
+            ? 'Login gudang tidak mengembalikan token akses.'
           : status
-            ? `Warehouse ${stage} request returned HTTP ${status}.`
-            : `The Warehouse ${stage} endpoint could not be reached.`;
+            ? `Permintaan gudang (${stage}) menghasilkan status HTTP ${status}.`
+            : `Endpoint gudang (${stage}) tidak dapat dihubungi: ${err.message}`;
       }
     } else if (this.loginUrl || this.inventoryUrl || this.username || this.password) {
-      warehouseApiMessage = 'Warehouse login configuration is incomplete. Set login URL, inventory URL, username, and password in Settings.';
+      warehouseApiMessage = 'Konfigurasi login gudang belum lengkap. Atur URL login, username, dan password di menu Pengaturan.';
     }
 
-    if (!items.length) {
-      items = await this.deriveFromShopeeProducts();
-    }
-
-    await this.persistItems(items);
+    const totalValuation = items.reduce((acc, item) => acc + (Number(item.priceMin || 0) * Number(item.totalStock || 0)), 0);
 
     return {
-      status: loginConfigured ? (source === 'WAREHOUSE_API' ? 'ONLINE' : 'UNAVAILABLE') : 'BASELINE',
+      status: loginConfigured ? (source === 'WAREHOUSE_API' ? 'ONLINE' : 'UNAVAILABLE') : 'DISCONNECTED',
       dataSource: source,
-      warehouseLocation: source === 'WAREHOUSE_API' ? 'Configured Warehouse API' : 'Shopee stock baseline',
+      warehouseLocation: source === 'WAREHOUSE_API' ? (this.teamName ? `PDC Gudang (${this.teamName})` : 'PDC Gudang API') : 'Belum Terhubung',
       totalSkus: items.length,
-      totalPhysicalUnits: items.reduce((acc, item) => acc + item.totalStock, 0),
-      totalAvailableUnits: items.reduce((acc, item) => acc + item.availableStock, 0),
+      totalPhysicalUnits: items.reduce((acc, item) => acc + (item.totalStock || 0), 0),
+      totalAvailableUnits: items.reduce((acc, item) => acc + (item.availableStock || 0), 0),
+      totalValuation,
       items,
-      message: warehouseApiMessage || (items.length ? null : 'No warehouse data yet. Sync Shopee first or configure Warehouse login in Settings.'),
+      syncStats: this.lastSyncStats || null,
+      team: this.teamName ? { id: this.teamId, name: this.teamName } : null,
+      message: warehouseApiMessage || (items.length ? null : 'Belum ada data inventori dari PDC Gudang. Pastikan konfigurasi terhubung.'),
+    };
+  }
+
+  async getProductDetail(sku, { warehouseId = null, variantId = null } = {}) {
+    if (!sku) throw new Error('SKU produk wajib diisi.');
+
+    const hasWarehouseRequest = warehouseId !== null && warehouseId !== undefined && String(warehouseId) !== '';
+    const requestedWarehouseId = isActiveWarehouseId(warehouseId) ? Number(warehouseId) : null;
+    const warehouseWhere = hasWarehouseRequest
+      ? { warehouseId: requestedWarehouseId || -1 }
+      : { warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST } };
+
+    // One SKU can have one row per active warehouse. Prefer the requested row,
+    // otherwise use the row with the highest current stock as metadata source.
+    let item = await prisma.warehouseItem.findFirst({
+      where: { sku, ...warehouseWhere },
+      orderBy: [{ totalStock: 'desc' }, { lastUpdated: 'desc' }],
+    });
+
+    if (!item) {
+      item = await prisma.warehouseItem.findFirst({
+        where: {
+          ...warehouseWhere,
+          OR: [
+            { sku: { contains: sku } },
+            { refId: { contains: sku } },
+            { name: { contains: sku } },
+          ],
+        },
+      });
+    }
+
+    const rawIds = item ? { rawProductId: item.rawProductId, rawVariationId: item.rawVariationId } : null;
+    const persistedWarehouseRows = await prisma.warehouseItem.findMany({
+      where: {
+        sku: item?.sku || sku,
+        warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST },
+      },
+      orderBy: [{ warehouseId: 'asc' }, { lastUpdated: 'desc' }],
+    });
+    const persistedWarehouseOptions = ACTIVE_WAREHOUSES.map((warehouse) => {
+      const row = persistedWarehouseRows.find((candidate) => Number(candidate.warehouseId) === warehouse.id);
+      const totalStock = Number(row?.totalStock || 0);
+      return {
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        availableStock: Number(row?.availableStock || 0),
+        reservedStock: Number(row?.reservedStock || 0),
+        totalStock,
+        disabled: totalStock <= 0,
+      };
+    });
+
+    let activeVariantId = variantId || rawIds?.rawVariationId || item?.rawVariationId || null;
+    if (!activeVariantId) {
+      activeVariantId = await this.discoverVariantIdBySku({ sku, item });
+      if (activeVariantId && item) {
+        try {
+          await prisma.warehouseItem.updateMany({
+            where: { sku: item.sku, warehouseId: item.warehouseId },
+            data: { rawVariationId: Number(activeVariantId) || null },
+          });
+        } catch (err) {
+          console.warn('[Warehouse Service] Failed to cache discovered variant id:', err.message);
+        }
+      }
+    }
+    let warehouseSkuDetail = null;
+    let warehouseDetailSource = 'PDC_VARIANT_API';
+    if (activeVariantId) {
+      try {
+        warehouseSkuDetail = await this.fetchVariantSkuDetail({ variantId: activeVariantId, warehouseId });
+        if (warehouseSkuDetail && item) {
+          item = {
+            ...item,
+            sku: warehouseSkuDetail.sku || item.sku,
+            totalStock: warehouseSkuDetail.totalStock,
+            reservedStock: warehouseSkuDetail.reservedStock,
+            availableStock: warehouseSkuDetail.availableStock,
+            warehouseId: warehouseSkuDetail.warehouseId || item.warehouseId,
+            warehouseName: warehouseSkuDetail.warehouseName || item.warehouseName,
+            warehouseLocation: warehouseSkuDetail.warehouseLocation || item.warehouseLocation,
+          };
+        }
+      } catch (err) {
+        warehouseDetailSource = 'WAREHOUSE_SNAPSHOT_FALLBACK';
+        console.warn('[Warehouse Service] Failed to fetch variant SKU detail; using persisted active warehouse rows:', err.message);
+      }
+    }
+
+    if (!warehouseSkuDetail && persistedWarehouseRows.length) {
+      warehouseDetailSource = 'WAREHOUSE_SNAPSHOT_FALLBACK';
+      const requestedWarehouse = hasWarehouseRequest && requestedWarehouseId
+        ? persistedWarehouseRows.find((row) => Number(row.warehouseId) === requestedWarehouseId)
+        : null;
+      const fallbackRow = requestedWarehouse || item || persistedWarehouseRows[0];
+      warehouseSkuDetail = {
+        variantId: Number(activeVariantId) || activeVariantId || fallbackRow?.rawVariationId || null,
+        warehouseId: fallbackRow?.warehouseId || null,
+        warehouseName: fallbackRow?.warehouseName || null,
+        warehouseLocation: fallbackRow?.warehouseLocation || null,
+        sku: fallbackRow?.sku || sku,
+        availableStock: Number(fallbackRow?.availableStock || 0),
+        reservedStock: Number(fallbackRow?.reservedStock || 0),
+        totalStock: Number(fallbackRow?.totalStock || 0),
+        noWarehouseMatch: Boolean(hasWarehouseRequest && !requestedWarehouse),
+        warehouseStockOptions: persistedWarehouseOptions,
+        raw: null,
+      };
+    }
+
+    // 2. Fetch Shopee mapping
+    let shopeeProduct = null;
+    if (item) {
+      shopeeProduct = await prisma.shopeeProduct.findFirst({
+        where: {
+          OR: [
+            { sku: item.sku },
+            { sku: item.refId || '' },
+            { name: item.name },
+          ],
+        },
+      });
+    }
+
+    // 3. Fetch Stock Movement History
+    const movements = await prisma.stockMovement.findMany({
+      where: {
+        OR: [
+          { sku },
+          item ? { sku: item.sku } : {},
+        ],
+      },
+      orderBy: { timestamp: 'desc' },
+      take: 50,
+    });
+
+    // 4. Fetch Stock Snapshots (historical trends)
+    const snapshots = await prisma.warehouseStockSnapshot.findMany({
+      where: {
+        OR: [
+          { sku },
+          item ? { sku: item.sku } : {},
+        ],
+      },
+      orderBy: { date: 'desc' },
+      take: 30,
+    });
+
+    // 5. Fetch Reconciliation History
+    const reconciliations = await prisma.stockReconciliation.findMany({
+      where: {
+        OR: [
+          { sku },
+          item ? { sku: item.sku } : {},
+        ],
+      },
+      orderBy: { checkedAt: 'desc' },
+      take: 10,
+    });
+
+    // Compute stock stats
+    const totalIn = movements.filter((m) => m.type === 'IN').reduce((acc, m) => acc + m.quantity, 0);
+    const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
+    const currentStock = item ? item.availableStock : 0;
+    const valuation = item ? (item.priceMin || 0) * (item.totalStock || 0) : 0;
+
+    return {
+      product: item || {
+        sku,
+        name: 'Produk Tidak Ditemukan di Database',
+        size: '-',
+        color: '-',
+        totalStock: 0,
+        reservedStock: 0,
+        availableStock: 0,
+        location: 'Belum teralokasi',
+        productType: 'general',
+        priceMin: 0,
+        priceMax: 0,
+        teamName: 'Belum diketahui',
+      },
+      shopeeProduct,
+      stats: {
+        totalIn,
+        totalOut,
+        currentStock,
+        valuation,
+        movementCount: movements.length,
+      },
+      movements,
+      snapshots,
+      reconciliations,
+      warehouseSkuDetail,
+      warehouseStockOptions: warehouseSkuDetail?.warehouseStockOptions || persistedWarehouseOptions,
+      warehouseDetailSource,
+    };
+  }
+
+  async getProductStockHistory(sku, { limit = 50, type = null } = {}) {
+    const where = { sku };
+    if (type) where.type = type.toUpperCase();
+
+    const movements = await prisma.stockMovement.findMany({
+      where,
+      orderBy: { timestamp: 'desc' },
+      take: Number(limit) || 50,
+    });
+
+    const totalIn = movements.filter((m) => m.type === 'IN').reduce((acc, m) => acc + m.quantity, 0);
+    const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
+
+    return {
+      sku,
+      totalIn,
+      totalOut,
+      count: movements.length,
+      movements,
     };
   }
 
@@ -308,7 +1384,8 @@ class WarehouseService {
         sku: item.sku,
         name: item.name,
         imageUrl: shopeeProduct?.imageUrl || item.imageUrl || null,
-        price: shopeeProduct?.price ?? null,
+        price: item.priceMin || shopeeProduct?.price || 0,
+        priceMax: item.priceMax || item.priceMin || shopeeProduct?.price || 0,
         size: item.size,
         color: item.color,
         totalStock: item.totalStock,
@@ -316,14 +1393,19 @@ class WarehouseService {
         warehouseStock,
         shopeeStock,
         location: item.location,
+        warehouseId: item.warehouseId,
+        warehouseName: item.warehouseName,
+        warehouseLocation: item.warehouseLocation,
+        teamName: item.teamName,
+        productType: item.productType,
         variance,
         status,
         recommendedAction:
           variance === 0
-            ? 'Stock levels are aligned.'
+            ? 'Stok Shopee dan Gudang seimbang.'
             : variance < 0
-              ? `Increase Shopee stock listing by ${Math.abs(variance)} units.`
-              : `Decrease Shopee listing by ${variance} units to prevent overselling.`,
+              ? `Tambah stok Shopee sebanyak ${Math.abs(variance)} unit.`
+              : `Kurangi stok Shopee sebanyak ${variance} unit untuk mencegah overselling.`,
       };
     });
 
@@ -333,6 +1415,8 @@ class WarehouseService {
           prisma.stockReconciliation.create({
             data: {
               sku: row.sku,
+              warehouseId: row.warehouseId || null,
+              warehouseName: row.warehouseName || null,
               shopeeStock: row.shopeeStock,
               warehouseStock: row.warehouseStock,
               variance: row.variance,
@@ -350,6 +1434,7 @@ class WarehouseService {
       matchedCount: reconciliationList.length - discrepanciesCount,
       discrepanciesCount,
       reconciliationList,
+      syncStats: inventory.syncStats,
       dataSource: inventory.dataSource,
       message: inventory.message,
     };

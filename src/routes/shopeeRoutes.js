@@ -7,6 +7,7 @@ const {
   getProductDetail,
   updateProductEconomics,
   getShopeeAds,
+  getProductPerformance,
   triggerSync,
   validateCookie
 } = require('../controllers/shopeeController');
@@ -21,6 +22,7 @@ router.get('/metrics', getShopeeMetrics);
 router.get('/product/:id', getProductDetail);
 router.put('/product/:id/economics', updateProductEconomics);
 router.get('/ads', getShopeeAds);
+router.get('/product-performance', getProductPerformance);
 router.post('/sync', triggerSync);
 router.get('/validate-cookie', validateCookie);
 

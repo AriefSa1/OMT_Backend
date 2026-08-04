@@ -125,7 +125,25 @@ async function updateSettings(req, res) {
   }
 }
 
+async function testWarehouseConnection(req, res) {
+  try {
+    const { loginUrl, inventoryUrl, username, password, loginFrom } = req.body || {};
+    const result = await warehouseService.testConnection({
+      loginUrl,
+      inventoryUrl,
+      username,
+      password,
+      loginFrom,
+    });
+    return res.json(result);
+  } catch (err) {
+    console.error('[settingsController] Error testing warehouse connection:', err.message);
+    return res.status(500).json({ success: false, error: err.message, message: err.message });
+  }
+}
+
 module.exports = {
   getSettings,
-  updateSettings
+  updateSettings,
+  testWarehouseConnection,
 };

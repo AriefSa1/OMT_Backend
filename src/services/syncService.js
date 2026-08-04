@@ -3,6 +3,7 @@ const shopeeService = require('./shopeeService');
 const shopeeInsightsService = require('./shopeeInsightsService');
 const warehouseService = require('./warehouseService');
 const snapshotService = require('./snapshotService');
+const syncLockService = require('./syncLockService');
 
 function number(value) {
   const parsed = Number(value);
@@ -114,6 +115,12 @@ class SyncService {
       }
       const impressions = number(row.product_card_impressions ?? row.impressions ?? row.impression);
       const clicks = number(row.clicks ?? row.product_click);
+      const views = number(row.pv ?? row.item_views ?? row.views ?? impressions);
+      const visitors = number(row.uv ?? row.item_uv ?? row.unique_visitors);
+      const addToCartUnits = number(row.add_to_cart_units ?? row.cart_units);
+      const confirmedOrders = number(row.confirmed_orders ?? row.confirmed_order ?? row.order_count);
+      const confirmedUnits = number(row.confirmed_units ?? row.units_sold ?? row.item_sold);
+      const confirmedBuyers = number(row.confirmed_buyers ?? row.buyers);
       return {
         storeId,
         shopeeItemId: matched.shopeeItemId,
@@ -121,13 +128,19 @@ class SyncService {
         productName: matched.name,
         category: matched.category || 'Tanpa kategori',
         impressions,
+        views,
+        visitors,
         clicks,
         ctr: normalizeRate(row.ctr ?? (impressions > 0 ? (clicks / impressions) * 100 : 0)),
         bounceRate: normalizeRate(row.bounce_rate),
         addToCartBuyers: number(row.add_to_cart_buyers ?? row.add_to_cart),
-        confirmedOrders: number(row.confirmed_orders ?? row.order_count),
+        addToCartUnits,
+        confirmedOrders,
+        confirmedUnits,
+        confirmedBuyers,
         confirmedSales: number(row.confirmed_sales ?? row.confirmed_gmv ?? row.sales),
-        conversionRate: normalizeRate(row.conversion_rate),
+        conversionRate: normalizeRate(row.conversion_rate ?? row.confirmed_order_conversion_rate
+          ?? (visitors > 0 ? (confirmedOrders / visitors) * 100 : 0)),
         dataAsOf,
       };
     }).filter(Boolean);
@@ -234,11 +247,22 @@ class SyncService {
       totalStock: number(item.totalStock),
       reservedStock: number(item.reservedStock),
       availableStock: number(item.availableStock ?? item.warehouseStock),
+      warehouseId: item.warehouseId ? number(item.warehouseId) : null,
+      warehouseName: item.warehouseName || null,
+      teamId: item.teamId ? number(item.teamId) : null,
+      teamName: item.teamName || null,
+      productType: item.productType || 'general',
       source: source || 'WAREHOUSE_API',
       dataAsOf,
     }));
     await prisma.$transaction(records.map((record) => prisma.warehouseStockSnapshot.upsert({
-      where: { sku_date: { sku: record.sku, date: record.date } },
+      where: {
+        sku_warehouseId_date: {
+          sku: record.sku,
+          warehouseId: record.warehouseId,
+          date: record.date,
+        },
+      },
       update: record,
       create: record,
     })));
@@ -286,43 +310,69 @@ class SyncService {
     }
   }
 
-  async syncWarehouse({ origin = 'MANUAL' } = {}) {
+  async syncWarehouse({ origin = 'MANUAL', skipLock = false } = {}) {
+    if (!skipLock) {
+      const locked = await syncLockService.runExclusive(() => this.syncWarehouse({ origin, skipLock: true }));
+      if (!locked.acquired) {
+        await this.writeLog('WAREHOUSE_SYNC', 'FAILED', locked.error.message);
+        return { success: false, source: 'Gudang', status: 'Gagal', message: locked.error.message, code: locked.error.code, origin };
+      }
+      return locked.value;
+    }
+
     const timestamp = new Date();
     try {
       const reconciliation = await warehouseService.calculateReconciliation();
-      const snapshotCount = await this.persistWarehouseSnapshots(reconciliation.reconciliationList, reconciliation.dataSource);
       const isLive = reconciliation.dataSource === 'WAREHOUSE_API';
-      const status = isLive ? 'SUCCESS' : 'DEGRADED';
-      const message = isLive
-        ? `Gudang disinkronkan dengan ${reconciliation.discrepanciesCount} selisih stok.`
-        : `Snapshot stok tersimpan dari baseline katalog; koneksi gudang belum tersedia (${reconciliation.discrepanciesCount} selisih).`;
-      await this.writeLog('WAREHOUSE_SYNC', status, message, timestamp);
+      if (!isLive) {
+        const errorMsg = reconciliation.message || 'Koneksi PDC Gudang gagal atau data tidak ditemukan.';
+        await this.writeLog('WAREHOUSE_SYNC', 'FAILED', errorMsg, timestamp);
+        return { success: false, source: 'Gudang', status: 'Gagal', message: errorMsg, origin };
+      }
+      const snapshotCount = await this.persistWarehouseSnapshots(reconciliation.reconciliationList, reconciliation.dataSource);
+      const syncStats = reconciliation.syncStats || null;
+      const message = `PDC Gudang disinkronkan (${reconciliation.totalAudited} SKU-gudang) dengan ${reconciliation.discrepanciesCount} selisih stok terhadap Shopee.`;
+      const auditMessage = syncStats
+        ? `${message} Stats: katalog=${syncStats.catalogProductCount || 0}, varian=${syncStats.variantCount || 0}, baris=${syncStats.persistedCandidateCount || snapshotCount}, unresolved=${syncStats.unresolvedVariantCount || 0}, gagal=${syncStats.failedVariantCount || 0}.`
+        : message;
+      await this.writeLog('WAREHOUSE_SYNC', 'SUCCESS', auditMessage, timestamp);
       return {
         success: true,
         source: 'Gudang',
-        status: isLive ? 'Segar' : 'Tertunda',
+        status: 'Segar',
         message,
         snapshotCount,
         discrepanciesCount: reconciliation.discrepanciesCount,
+        syncStats,
         origin,
       };
     } catch (err) {
       await this.writeLog('WAREHOUSE_SYNC', 'FAILED', err.message, timestamp);
-      return { success: false, source: 'Gudang', status: 'Gagal', message: 'Sinkronisasi gudang gagal.', origin };
+      return { success: false, source: 'Gudang', status: 'Gagal', message: `Sinkronisasi gudang gagal: ${err.message}`, origin };
     }
   }
 
   async syncAll({ origin = 'MANUAL' } = {}) {
-    const startedAt = new Date();
-    const shopee = await this.syncShopee({ origin });
-    const ads = await this.syncAds({ origin });
-    const warehouse = await this.syncWarehouse({ origin });
-    const results = [shopee, ads, warehouse];
-    const successCount = results.filter((result) => result.success).length;
-    const status = successCount === results.length ? 'SUCCESS' : successCount ? 'DEGRADED' : 'FAILED';
-    const message = `${successCount}/${results.length} sumber selesai disinkronkan.`;
-    await this.writeLog('FULL_SYNC', status, message, startedAt);
-    return { success: successCount > 0, status, message, startedAt: startedAt.toISOString(), results };
+    const locked = await syncLockService.runExclusive(async () => {
+      const startedAt = new Date();
+      const shopee = await this.syncShopee({ origin });
+      const ads = await this.syncAds({ origin });
+      const warehouse = await this.syncWarehouse({ origin, skipLock: true });
+      const results = [shopee, ads, warehouse];
+      const successCount = results.filter((result) => result.success).length;
+      const status = successCount === results.length ? 'SUCCESS' : successCount ? 'DEGRADED' : 'FAILED';
+      const message = `${successCount}/${results.length} sumber selesai disinkronkan.`;
+      await this.writeLog('FULL_SYNC', status, message, startedAt);
+      return { success: successCount > 0, status, message, startedAt: startedAt.toISOString(), results };
+    });
+
+    if (!locked.acquired) {
+      const message = locked.error.message;
+      await this.writeLog('FULL_SYNC', 'FAILED', message);
+      return { success: false, status: 'FAILED', message, code: locked.error.code, results: [] };
+    }
+
+    return locked.value;
   }
 }
 
