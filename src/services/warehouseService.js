@@ -1250,52 +1250,43 @@ class WarehouseService {
       };
     }
 
+    // Every history lookup below is scoped to these SKUs.
+    const historySkus = [...new Set([sku, item?.sku].filter(Boolean))];
+
     // 2. Fetch Shopee mapping
     let shopeeProduct = null;
     if (item) {
-      shopeeProduct = await prisma.shopeeProduct.findFirst({
-        where: {
-          OR: [
-            { sku: item.sku },
-            { sku: item.refId || '' },
-            { name: item.name },
-          ],
-        },
-      });
+      // refId and name are optional. Skip absent ones rather than substituting '' —
+      // a literal empty-string match would pair this item with any Shopee product
+      // persisted without a SKU (persistProducts writes `sku: product.sku || ''`).
+      const shopeeMatchers = [
+        item.sku ? { sku: item.sku } : null,
+        item.refId ? { sku: item.refId } : null,
+        item.name ? { name: item.name } : null,
+      ].filter(Boolean);
+
+      if (shopeeMatchers.length) {
+        shopeeProduct = await prisma.shopeeProduct.findFirst({ where: { OR: shopeeMatchers } });
+      }
     }
 
     // 3. Fetch Stock Movement History
     const movements = await prisma.stockMovement.findMany({
-      where: {
-        OR: [
-          { sku },
-          item ? { sku: item.sku } : {},
-        ],
-      },
+      where: { sku: { in: historySkus } },
       orderBy: { timestamp: 'desc' },
       take: 50,
     });
 
     // 4. Fetch Stock Snapshots (historical trends)
     const snapshots = await prisma.warehouseStockSnapshot.findMany({
-      where: {
-        OR: [
-          { sku },
-          item ? { sku: item.sku } : {},
-        ],
-      },
+      where: { sku: { in: historySkus } },
       orderBy: { date: 'desc' },
       take: 30,
     });
 
     // 5. Fetch Reconciliation History
     const reconciliations = await prisma.stockReconciliation.findMany({
-      where: {
-        OR: [
-          { sku },
-          item ? { sku: item.sku } : {},
-        ],
-      },
+      where: { sku: { in: historySkus } },
       orderBy: { checkedAt: 'desc' },
       take: 10,
     });
@@ -1306,21 +1297,20 @@ class WarehouseService {
     const currentStock = item ? item.availableStock : 0;
     const valuation = item ? (item.priceMin || 0) * (item.totalStock || 0) : 0;
 
-    return {
-      product: item || {
+    // An unknown SKU is a 404, not a product whose every field happens to be zero.
+    // Returning a synthetic row here made "not found" indistinguishable from
+    // "found, but empty".
+    if (!item) {
+      return {
+        found: false,
         sku,
-        name: 'Produk Tidak Ditemukan di Database',
-        size: '-',
-        color: '-',
-        totalStock: 0,
-        reservedStock: 0,
-        availableStock: 0,
-        location: 'Belum teralokasi',
-        productType: 'general',
-        priceMin: 0,
-        priceMax: 0,
-        teamName: 'Belum diketahui',
-      },
+        message: `SKU ${sku} tidak ditemukan pada snapshot gudang.`,
+      };
+    }
+
+    return {
+      found: true,
+      product: item,
       shopeeProduct,
       stats: {
         totalIn,

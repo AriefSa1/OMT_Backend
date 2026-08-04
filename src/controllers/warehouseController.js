@@ -33,9 +33,19 @@ async function getProductDetail(req, res) {
       warehouseId: req.query.warehouseId,
       variantId: req.query.variantId,
     });
+
+    if (!detail.found) {
+      return res.status(404).json({
+        success: false,
+        error: detail.message,
+        message: detail.message,
+      });
+    }
+
+    const { found, ...payload } = detail;
     return res.json({
       success: true,
-      ...detail,
+      ...payload,
     });
   } catch (err) {
     console.error('[Warehouse Controller] getProductDetail error:', err);
