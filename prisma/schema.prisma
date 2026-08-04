@@ -1,0 +1,244 @@
+// Prisma Schema for Internal Marketplace & Warehouse Analytics
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      String   @default("ANALYST") // ADMIN, MANAGER, ANALYST
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model StoreSession {
+  id           String   @id @default(uuid())
+  storeName    String
+  storeId      String   @unique
+  cookieString String
+  userAgent    String
+  csrfToken    String?
+  isActive     Boolean  @default(true)
+  lastSyncedAt DateTime @default(now())
+  expiresAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model ShopeeProduct {
+  id            String   @id @default(uuid())
+  storeId       String
+  shopeeItemId  String   @unique
+  name          String
+  sku           String
+  price         Float
+  stock         Int
+  salesCount    Int      @default(0)
+  views         Int      @default(0)
+  addToCart     Int      @default(0)
+  category      String   @default("Uncategorized")
+  l2CategoryId  String?
+  l3CategoryId  String?
+  l2CategoryName String?
+  l3CategoryName String?
+  imageUrl      String?
+  rating        Float    @default(0)
+  unitCost      Float?
+  unitAdCost    Float?
+  shippingCost  Float?
+  platformFeePercent Float?
+  updatedAt     DateTime @updatedAt
+
+  @@index([storeId, category])
+}
+
+model ShopeeOrderSummary {
+  id                String   @id @default(uuid())
+  storeId           String
+  date              String   // YYYY-MM-DD
+  gmv               Float
+  orderCount        Int
+  conversionRate    Float
+  averageOrderValue Float
+  createdAt         DateTime @default(now())
+
+  @@unique([storeId, date])
+}
+
+model ShopeeAdsData {
+  id          String   @id @default(uuid())
+  storeId     String
+  date        String   // YYYY-MM-DD
+  spend       Float
+  sales       Float
+  roas        Float
+  impressions Int
+  clicks      Int
+  ctr         Float
+  rawSpend    Float    @default(0)
+  rawSales    Float    @default(0)
+  rawVoucherSpend Float @default(0)
+  rawVoucherSales Float @default(0)
+  amountDivisor Int   @default(100000)
+  voucherSpend Float  @default(0)
+  voucherSales Float  @default(0)
+  dataAsOf    DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@unique([storeId, date])
+}
+
+model ShopeeAdsCampaignSnapshot {
+  id                String   @id @default(uuid())
+  storeId           String
+  campaignId        String
+  date              String
+  name              String
+  type              String
+  state             String
+  dailyBudget       Float    @default(0)
+  spend             Float    @default(0)
+  sales             Float    @default(0)
+  rawSpend          Float    @default(0)
+  rawSales          Float    @default(0)
+  rawDailyBudget    Float    @default(0)
+  amountDivisor     Int      @default(100000)
+  impressions       Int      @default(0)
+  clicks            Int      @default(0)
+  ctr               Float    @default(0)
+  roas              Float    @default(0)
+  voucherSpend      Float    @default(0)
+  voucherSales      Float    @default(0)
+  rawVoucherSpend   Float    @default(0)
+  rawVoucherSales   Float    @default(0)
+  dataAsOf          DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([storeId, campaignId, date])
+  @@index([storeId, date])
+}
+
+model ProductMetricSnapshot {
+  id                   String   @id @default(uuid())
+  storeId              String
+  shopeeItemId         String
+  date                 String
+  productName          String
+  category             String   @default("Uncategorized")
+  impressions          Int      @default(0)
+  clicks               Int      @default(0)
+  ctr                  Float    @default(0)
+  bounceRate           Float    @default(0)
+  addToCartBuyers      Int      @default(0)
+  confirmedOrders      Int      @default(0)
+  confirmedSales       Float    @default(0)
+  conversionRate       Float    @default(0)
+  dataAsOf             DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([storeId, shopeeItemId, date])
+  @@index([storeId, date])
+}
+
+model WarehouseItem {
+  id             String   @id @default(uuid())
+  sku            String   @unique
+  name           String
+  size           String
+  color          String
+  totalStock     Int
+  reservedStock  Int
+  availableStock Int
+  imageUrl       String?
+  location       String   @default("UNASSIGNED")
+  lastUpdated    DateTime @default(now())
+}
+
+model WarehouseStockSnapshot {
+  id             String   @id @default(uuid())
+  sku            String
+  date           String
+  name           String
+  totalStock     Int      @default(0)
+  reservedStock  Int      @default(0)
+  availableStock Int      @default(0)
+  source         String   @default("WAREHOUSE_API")
+  dataAsOf       DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([sku, date])
+  @@index([date])
+}
+
+model StockReconciliation {
+  id             String   @id @default(uuid())
+  sku            String
+  shopeeStock    Int
+  warehouseStock Int
+  variance       Int
+  status         String   // MATCHED, DISCREPANCY, CRITICAL
+  checkedAt      DateTime @default(now())
+}
+
+model SyncJobLog {
+  id        String   @id @default(uuid())
+  jobType   String   // SHOPEE_SYNC, WAREHOUSE_SYNC, RECONCILIATION
+  status    String   // SUCCESS, DEGRADED, FAILED, RUNNING
+  message   String
+  timestamp DateTime @default(now())
+}
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model OptimizationTask {
+  id               String   @id @default(uuid())
+  recommendationId String
+  type             String
+  title            String
+  description      String
+  source           String   @default("SYSTEM")
+  entityType       String   @default("PRODUCT")
+  entityId         String?
+  priority         String   @default("MEDIUM")
+  status           String   @default("PROPOSED")
+  createdById      String?
+  createdByName    String?
+  updatedById      String?
+  updatedByName    String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  completedAt      DateTime?
+  events           OptimizationTaskEvent[]
+
+  @@index([status, priority])
+  @@index([entityType, entityId])
+  @@index([recommendationId])
+}
+
+model OptimizationTaskEvent {
+  id          String           @id @default(uuid())
+  taskId      String
+  task        OptimizationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  status      String
+  note        String?
+  actorId     String?
+  actorName   String?
+  createdAt   DateTime         @default(now())
+
+  @@index([taskId, createdAt])
+}
