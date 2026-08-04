@@ -46,6 +46,32 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Unmatched API routes: answer explicitly rather than falling through to Express's
+// HTML default, which the frontend's response.json() cannot parse.
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Endpoint tidak ditemukan: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Error pipeline. Controllers are wrapped with asyncHandler (src/utils/asyncHandler.js),
+// so a rejected async handler lands here instead of leaving the request hanging until
+// the client times out. Must stay last, and must keep all four arguments — Express
+// identifies error middleware by arity.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error(`[API Error] ${req.method} ${req.originalUrl}:`, err);
+
+  if (res.headersSent) return next(err);
+
+  const status = Number(err.status || err.statusCode) || 500;
+  return res.status(status).json({
+    success: false,
+    error: err.expose && err.message ? err.message : 'Terjadi kesalahan pada server.',
+  });
+});
+
 async function initApp() {
   try {
     console.log('Initializing system configuration from database...');

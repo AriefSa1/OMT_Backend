@@ -1,5 +1,6 @@
 const prisma = require('../utils/prisma');
 const syncService = require('../services/syncService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getSyncLogs(req, res) {
   try {
@@ -15,4 +16,4 @@ async function runFullSync(req, res) {
   return res.status(result.success ? 200 : 502).json(result);
 }
 
-module.exports = { getSyncLogs, runFullSync };
+module.exports = wrapHandlers({ getSyncLogs, runFullSync });

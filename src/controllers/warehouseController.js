@@ -1,6 +1,7 @@
 const snapshotService = require('../services/snapshotService');
 const warehouseService = require('../services/warehouseService');
 const syncService = require('../services/syncService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getInventory(req, res) {
   try {
@@ -92,10 +93,10 @@ async function triggerWarehouseSync(req, res) {
   return res.status(result.success ? 200 : 502).json(result);
 }
 
-module.exports = {
+module.exports = wrapHandlers({
   getInventory,
   getProductDetail,
   getProductHistory,
   getReconciliation,
   triggerWarehouseSync,
-};
+});

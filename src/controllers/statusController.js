@@ -2,6 +2,7 @@ const configService = require('../services/configService');
 const shopeeService = require('../services/shopeeService');
 const prisma = require('../utils/prisma');
 const snapshotService = require('../services/snapshotService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getStatus(req, res) {
   try {
@@ -41,4 +42,4 @@ async function getStatus(req, res) {
   }
 }
 
-module.exports = { getStatus };
+module.exports = wrapHandlers({ getStatus });

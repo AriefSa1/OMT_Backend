@@ -2,6 +2,7 @@ const optimizationService = require('../services/optimizationService');
 const shopeeInsightsService = require('../services/shopeeInsightsService');
 const snapshotService = require('../services/snapshotService');
 const prisma = require('../utils/prisma');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getProductOpts(req, res) {
   const data = await optimizationService.getProductOptimizations();
@@ -69,7 +70,7 @@ async function refreshCompetitorInsights(req, res) {
   return res.json({ success: result.source === 'SHOPEE_API', data: result });
 }
 
-module.exports = {
+module.exports = wrapHandlers({
   getProductOpts,
   getStoreOpts,
   getAdsOpts,
@@ -77,4 +78,4 @@ module.exports = {
   getMarketplaceInsights,
   getCompetitorInsights,
   refreshCompetitorInsights,
-};
+});

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'aesthetic_girly_fashion_analytics_secret_key_2026';
 
@@ -154,4 +155,4 @@ async function getMe(req, res) {
   }
 }
 
-module.exports = { register, login, getMe };
+module.exports = wrapHandlers({ register, login, getMe });

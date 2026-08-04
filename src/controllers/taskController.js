@@ -1,5 +1,6 @@
 const taskService = require('../services/taskService');
 const snapshotService = require('../services/snapshotService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function listTasks(req, res) {
   try {
@@ -38,4 +39,4 @@ async function updateTask(req, res) {
   }
 }
 
-module.exports = { listTasks, createTask, updateTask };
+module.exports = wrapHandlers({ listTasks, createTask, updateTask });

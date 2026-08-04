@@ -1,5 +1,6 @@
 const aiService = require('../services/aiService');
 const snapshotService = require('../services/snapshotService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function generateTitle(req, res) {
   const { productName, category, geminiApiKey } = req.body;
@@ -136,7 +137,7 @@ async function optimizeAdsKeywords(req, res) {
   }
 }
 
-module.exports = {
+module.exports = wrapHandlers({
   generateTitle,
   generateStoreCopy,
   generateAds,
@@ -145,4 +146,4 @@ module.exports = {
   simulatePricing,
   getDailyBriefing,
   optimizeAdsKeywords,
-};
+});

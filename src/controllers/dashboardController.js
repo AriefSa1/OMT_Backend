@@ -1,4 +1,5 @@
 const analyticsService = require('../services/analyticsService');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getOverview(req, res) {
   try {
@@ -9,4 +10,4 @@ async function getOverview(req, res) {
   }
 }
 
-module.exports = { getOverview };
+module.exports = wrapHandlers({ getOverview });

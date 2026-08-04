@@ -4,6 +4,7 @@ const configService = require('../services/configService');
 const snapshotService = require('../services/snapshotService');
 const syncService = require('../services/syncService');
 const prisma = require('../utils/prisma');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 function toPublicAnalysis(analysis) {
   return {
@@ -183,7 +184,7 @@ async function getProductPerformance(req, res) {
   }
 }
 
-module.exports = {
+module.exports = wrapHandlers({
   parseCookie,
   getSessionStatus,
   getShopeeMetrics,
@@ -193,4 +194,4 @@ module.exports = {
   getProductPerformance,
   triggerSync,
   validateCookie,
-};
+});

@@ -3,6 +3,7 @@ const aiService = require('../services/aiService');
 const shopeeService = require('../services/shopeeService');
 const warehouseService = require('../services/warehouseService');
 const { initCronJobs } = require('../cron/syncCron');
+const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getSettings(req, res) {
   try {
@@ -142,8 +143,8 @@ async function testWarehouseConnection(req, res) {
   }
 }
 
-module.exports = {
+module.exports = wrapHandlers({
   getSettings,
   updateSettings,
   testWarehouseConnection,
-};
+});
