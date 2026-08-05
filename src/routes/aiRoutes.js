@@ -6,6 +6,7 @@ const {
   simulatePricing,
   getDailyBriefing,
   optimizeAdsKeywords,
+  suggestScaleUp,
 } = require('../controllers/aiController');
 
 const router = express.Router();
@@ -18,5 +19,6 @@ router.post('/pricing-simulator', simulatePricing);
 router.get('/daily-briefing', getDailyBriefing);
 router.post('/daily-briefing', getDailyBriefing);
 router.post('/ads-keyword-optimization', optimizeAdsKeywords);
+router.post('/scale-up-strategy', suggestScaleUp);
 
 module.exports = router;

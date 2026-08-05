@@ -477,6 +477,92 @@ risks: 1-3 item. dataGaps: hanya isi bila memang ada data "belum tersedia" di at
     });
   }
 
+  // 6b. FITUR 6: AI Scale-Up Strategy per produk
+  //
+  // Berbeda dari A/B copywriter (yang menulis teks listing), fitur ini menjawab pertanyaan
+  // "produk ini sudah jalan — bagaimana menaikkannya?" dengan bahan yang benar-benar
+  // dimiliki: peringkat penjualan per varian, metrik funnel, dan stok.
+  async suggestScaleUpStrategy({
+    name = '', category = '', price = 0, stock = 0, salesCount = 0,
+    metric = null, variations = [], variationSummary = null,
+  } = {}) {
+    if (!this.ai) {
+      return this.notConfigured({ productName: name });
+    }
+
+    // Varian adalah bahan utama analisis ini. Tanpa data penjualan per varian, model hanya
+    // akan mengarang mana yang "terlaris" — jadi ditolak lebih awal, bukan dipaksakan.
+    if (!variationSummary?.hasSoldData) {
+      return this.missingInput(
+        { productName: name },
+        variationSummary?.message
+          || 'Penjualan per varian belum tersedia untuk produk ini, sehingga strategi scale-up berbasis varian belum dapat disusun.'
+      );
+    }
+
+    const topVariations = variations.slice(0, 8).map((row, index) => {
+      const share = Number.isFinite(Number(row.soldShare)) ? ` — ${Number(row.soldShare).toFixed(1)}% dari penjualan varian` : '';
+      return `  ${index + 1}. "${row.name}": ${row.soldCount} terjual${share}, stok ${row.stock}`;
+    }).join('\n');
+    const deadVariations = variations.filter((row) => Number(row.soldCount) === 0);
+    const orUnknown = (value, format) => (value === null || value === undefined || !Number.isFinite(Number(value)) ? 'belum tersedia' : format(Number(value)));
+
+    return this.callGemini({
+      logLabel: 'scale-up strategy',
+      trusted: { productName: name, variationSummary },
+      failMessage: 'Gagal menyusun strategi scale-up.',
+      prompt: `Anda konsultan pertumbuhan penjual Shopee Indonesia. Tugas Anda MENAIKKAN penjualan produk yang sudah berjalan — bukan meringkas datanya.
+
+PRODUK: "${name}" (kategori: ${category || 'belum tersedia'})
+Harga: Rp ${Number(price).toLocaleString('id-ID')} | Stok katalog: ${Number(stock).toLocaleString('id-ID')} | Total terjual: ${Number(salesCount).toLocaleString('id-ID')}
+
+FUNNEL (snapshot terakhir):
+- Impresi: ${orUnknown(metric?.impressions, (v) => v.toLocaleString('id-ID'))}
+- CTR: ${orUnknown(metric?.ctr, (v) => `${v.toFixed(2)}%`)}
+- Pengunjung: ${orUnknown(metric?.visitors, (v) => v.toLocaleString('id-ID'))}
+- Masuk keranjang: ${orUnknown(metric?.addToCartBuyers, (v) => `${v} pembeli`)}
+- Pesanan terkonfirmasi: ${orUnknown(metric?.confirmedOrders, (v) => String(v))}
+- Rasio konversi: ${orUnknown(metric?.conversionRate, (v) => `${v.toFixed(2)}%`)}
+- Bounce rate: ${orUnknown(metric?.bounceRate, (v) => `${v.toFixed(2)}%`)}
+
+PENJUALAN PER VARIAN (${variationSummary.count} varian, total ${variationSummary.soldTotal} terjual):
+${topVariations}
+${deadVariations.length ? `Varian tanpa penjualan sama sekali: ${deadVariations.length} dari ${variationSummary.count} — contoh: ${deadVariations.slice(0, 5).map((row) => `"${row.name}"`).join(', ')}` : 'Semua varian memiliki penjualan.'}
+
+ATURAN KERAS:
+1. Nilai "belum tersedia" berarti belum terukur. Jangan mengarang angkanya.
+2. Analisis harus BERTUMPU pada sebaran varian di atas — sebutkan nama varian yang Anda
+   maksud. Saran yang tidak menyebut varian atau angka spesifik dianggap gagal.
+3. Setiap rekomendasi harus menyatakan tindakan konkret yang bisa dieksekusi minggu ini,
+   bukan prinsip umum seperti "tingkatkan kualitas konten".
+4. Bedakan masalah funnel: impresi rendah = masalah jangkauan; CTR rendah = masalah
+   thumbnail/judul/harga tampil; keranjang tinggi tapi pesanan rendah = masalah checkout
+   (ongkir, voucher, harga akhir). Tunjuk yang paling relevan bagi produk ini.
+
+Kembalikan JSON murni:
+{
+  "verdict": "Satu kalimat: peluang terbesar untuk menaikkan produk ini",
+  "variantStrategy": {
+    "doubleDown": "Varian yang harus didorong dan alasannya (sebut nama varian + angkanya)",
+    "fix": "Varian yang perlu diperbaiki dan apa yang harus diubah",
+    "retire": "Varian yang sebaiknya dihentikan/disembunyikan, atau 'tidak ada' bila belum perlu"
+  },
+  "funnelDiagnosis": {
+    "bottleneck": "Tahap funnel yang paling menghambat: JANGKAUAN | KLIK | KERANJANG | CHECKOUT",
+    "evidence": "Angka yang mendasari kesimpulan itu",
+    "fix": "Perbaikan konkret untuk tahap tersebut"
+  },
+  "scaleUpActions": [
+    { "action": "Tindakan spesifik", "how": "Langkah konkret", "expectedImpact": "Dampak realistis yang diharapkan", "effort": "RENDAH" }
+  ],
+  "stockRisk": "Risiko stok bila penjualan naik sesuai rencana, berdasarkan stok varian di atas",
+  "dataGaps": ["Data yang perlu disinkronkan agar analisis lebih tajam"]
+}
+
+scaleUpActions: 3-5 item, effort salah satu dari RENDAH/SEDANG/TINGGI. dataGaps: [] bila tidak ada.`,
+    });
+  }
+
   // 7. FITUR 5: AI Ads Negative Keyword & Bid Optimization
   async optimizeAdsKeywordsAndBids({ campaignName = 'Shopee Ads', spend = 0, sales = 0, roas = 0, ctr = 0, category = '' }) {
     const isUnderperforming = roas > 0 && roas < 2.5;

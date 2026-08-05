@@ -49,6 +49,12 @@ const optimizeAdsKeywords = aiEndpoint('optimizeAdsKeywordsAndBids', ({ campaign
   { campaignName, spend, sales, roas, ctr, category }
 ));
 
+// 6. Scale-Up Strategy per produk — dibangun di atas penjualan per varian, jadi menerima
+// `variations` dan `variationSummary` apa adanya dari snapshot produk.
+const suggestScaleUp = aiEndpoint('suggestScaleUpStrategy', ({ name, category, price, stock, salesCount, metric, variations, variationSummary }) => (
+  { name, category, price, stock, salesCount, metric, variations, variationSummary }
+));
+
 // 4. Daily Briefing — kept as its own function: unlike the four above, it does not take
 // a request body, it composes three snapshots first, and its response shape wraps the
 // service result inside `briefing` rather than returning it directly.
@@ -91,4 +97,5 @@ module.exports = wrapHandlers({
   simulatePricing,
   getDailyBriefing,
   optimizeAdsKeywords,
+  suggestScaleUp,
 });

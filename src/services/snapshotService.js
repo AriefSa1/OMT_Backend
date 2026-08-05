@@ -177,6 +177,22 @@ class SnapshotService {
       })
       : [];
     const latestMetrics = new Map(getLatestBy(metrics, 'shopeeItemId').map((metric) => [metric.shopeeItemId, metric]));
+
+    // Varian hanya untuk produk di halaman ini, bukan seluruh katalog. Diurutkan menurun
+    // agar varian terlaris berada di depan tanpa pengurutan ulang di sisi klien.
+    const variationRows = productIds.length
+      ? await prisma.shopeeListingVariation.findMany({
+        where: { shopeeItemId: { in: productIds } },
+        orderBy: [{ soldCount: 'desc' }, { name: 'asc' }],
+      })
+      : [];
+    const variationsByItem = new Map();
+    for (const row of variationRows) {
+      const list = variationsByItem.get(row.shopeeItemId) || [];
+      list.push(row);
+      variationsByItem.set(row.shopeeItemId, list);
+    }
+
     const dataAsOf = maxDate([metrics[0]?.dataAsOf, session?.lastSyncedAt]);
     const meta = freshnessMeta({
       source: SOURCE.SHOPEE,
@@ -188,16 +204,43 @@ class SnapshotService {
     });
 
     return {
-      products: products.map((product) => ({
-        ...product,
-        metric: latestMetrics.get(product.shopeeItemId) || null,
-        economics: {
-          unitCost: product.unitCost,
-          unitAdCost: product.unitAdCost,
-          shippingCost: product.shippingCost,
-          platformFeePercent: product.platformFeePercent,
-        },
-      })),
+      products: products.map((product) => {
+        const rawVariations = variationsByItem.get(product.shopeeItemId) || [];
+        const soldTotal = rawVariations.reduce((sum, row) => sum + number(row.soldCount), 0);
+        // Peringkat dan pangsa dihitung di sini juga, bukan hanya di getProductSnapshot,
+        // supaya daftar varian di katalog dan di halaman detail menampilkan angka yang sama.
+        const variations = rawVariations.map((row, index) => ({
+          ...row,
+          rank: index + 1,
+          soldShare: soldTotal > 0 ? (number(row.soldCount) / soldTotal) * 100 : null,
+        }));
+        return {
+          ...product,
+          metric: latestMetrics.get(product.shopeeItemId) || null,
+          variations,
+          variationSummary: {
+            count: variations.length,
+            // Total penjualan per varian tidak harus sama dengan salesCount produk:
+            // salesCount adalah angka kumulatif toko dari Seller Center, sedangkan ini
+            // penjumlahan per varian pada snapshot yang sama. Keduanya dilaporkan
+            // apa adanya, tidak ada yang disesuaikan agar cocok.
+            soldTotal,
+            stockTotal: variations.reduce((sum, row) => sum + number(row.stock), 0),
+            bestSeller: variations.length && number(variations[0].soldCount) > 0
+              ? { name: variations[0].name, soldCount: number(variations[0].soldCount), stock: number(variations[0].stock) }
+              : null,
+            // Penjualan per varian belum tentu terisi: Shopee mengirim 0 untuk varian yang
+            // memang belum pernah terjual, dan panel harus membedakannya dari "belum diukur".
+            hasSoldData: soldTotal > 0,
+          },
+          economics: {
+            unitCost: product.unitCost,
+            unitAdCost: product.unitAdCost,
+            shippingCost: product.shippingCost,
+            platformFeePercent: product.platformFeePercent,
+          },
+        };
+      }),
       filters: {
         categories: categoryRows.map((row) => row.category).filter(Boolean),
         activeCategory: selectedCategory,
@@ -347,7 +390,7 @@ class SnapshotService {
   async getProductSnapshot(itemId) {
     const product = await prisma.shopeeProduct.findUnique({ where: { shopeeItemId: String(itemId) } });
     if (!product) return null;
-    const [metrics, session, warehouseRows] = await Promise.all([
+    const [metrics, session, warehouseRows, variations] = await Promise.all([
       prisma.productMetricSnapshot.findMany({
         where: { shopeeItemId: String(itemId) },
         orderBy: { date: 'desc' },
@@ -360,6 +403,10 @@ class SnapshotService {
           select: { availableStock: true },
         })
         : Promise.resolve([]),
+      prisma.shopeeListingVariation.findMany({
+        where: { shopeeItemId: String(itemId) },
+        orderBy: [{ soldCount: 'desc' }, { name: 'asc' }],
+      }),
     ]);
     const latestMetric = metrics[0] || null;
     const meta = freshnessMeta({
@@ -382,11 +429,37 @@ class SnapshotService {
     const estimatedMargin = economicsComplete
       ? number(product.price) - unitCost - unitAdCost - shippingCost - feeAmount
       : null;
+    // Peringkat varian menurut penjualan, plus pangsa tiap varian terhadap total varian.
+    // Pangsa memakai penyebut penjumlahan varian (bukan salesCount produk) karena hanya
+    // itu yang benar-benar sebanding — keduanya berasal dari hitungan yang berbeda.
+    const variationSoldTotal = variations.reduce((sum, row) => sum + number(row.soldCount), 0);
+    const rankedVariations = variations.map((row, index) => ({
+      ...row,
+      rank: index + 1,
+      soldShare: variationSoldTotal > 0 ? (number(row.soldCount) / variationSoldTotal) * 100 : null,
+    }));
+
     return {
       product: {
         ...product,
         metric: latestMetric,
         metricHistory: metrics,
+        variations: rankedVariations,
+        variationSummary: {
+          count: rankedVariations.length,
+          soldTotal: variationSoldTotal,
+          stockTotal: rankedVariations.reduce((sum, row) => sum + number(row.stock), 0),
+          hasSoldData: variationSoldTotal > 0,
+          bestSeller: variationSoldTotal > 0 ? rankedVariations[0] : null,
+          // Varian tanpa penjualan sama sekali: kandidat untuk dihentikan atau diperbaiki,
+          // tapi hanya bermakna kalau varian lain memang ada penjualannya.
+          zeroSellerCount: variationSoldTotal > 0
+            ? rankedVariations.filter((row) => number(row.soldCount) === 0).length
+            : null,
+          message: rankedVariations.length
+            ? (variationSoldTotal > 0 ? null : 'Seller Center belum mencatat penjualan per varian untuk produk ini.')
+            : 'Produk ini tidak memiliki varian pada snapshot katalog.',
+        },
         economics: {
           unitCost: product.unitCost,
           unitAdCost: product.unitAdCost,
