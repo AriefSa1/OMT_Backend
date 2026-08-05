@@ -82,6 +82,7 @@ async function getShopeeMetrics(req, res) {
   return res.json({
     success: true,
     products: snapshot.products,
+    filters: snapshot.filters,
     pagination: snapshot.pagination,
     meta: snapshot.meta,
     dataSource: snapshot.meta.source,

@@ -134,23 +134,39 @@ class SnapshotService {
     return { session, latestShopeeLog, latestAdsLog, latestWarehouseLog, warehouseConfigured };
   }
 
-  async getCatalogSnapshot({ page = 1, limit = 24, search = '', sort = 'updatedAt', direction = 'desc' } = {}) {
+  async getCatalogSnapshot({ page = 1, limit = 24, search = '', category = '', sort = 'updatedAt', direction = 'desc' } = {}) {
     const { session, latestShopeeLog } = await this.getContext();
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
+    const storeWhere = session?.storeId ? { storeId: session.storeId } : {};
+    const searchTerm = String(search || '').trim();
+    const selectedCategory = String(category || '').trim();
     const where = {
-      ...(session?.storeId ? { storeId: session.storeId } : {}),
-      ...(search ? { name: { contains: String(search) } } : {}),
+      ...storeWhere,
+      ...(searchTerm ? {
+        OR: [
+          { name: { contains: searchTerm } },
+          { sku: { contains: searchTerm } },
+          { shopeeItemId: { contains: searchTerm } },
+        ],
+      } : {}),
+      ...(selectedCategory ? { category: selectedCategory } : {}),
     };
     const allowedSort = new Set(['updatedAt', 'name', 'price', 'stock', 'salesCount', 'views']);
     const orderBy = { [allowedSort.has(sort) ? sort : 'updatedAt']: direction === 'asc' ? 'asc' : 'desc' };
-    const [total, products, metrics] = await Promise.all([
+    const [total, products, metrics, categoryRows] = await Promise.all([
       prisma.shopeeProduct.count({ where }),
       prisma.shopeeProduct.findMany({ where, orderBy, skip: (safePage - 1) * safeLimit, take: safeLimit }),
       prisma.productMetricSnapshot.findMany({
         where: session?.storeId ? { storeId: session.storeId } : {},
         orderBy: { dataAsOf: 'desc' },
         take: 500,
+      }),
+      prisma.shopeeProduct.findMany({
+        where: storeWhere,
+        select: { category: true },
+        distinct: ['category'],
+        orderBy: { category: 'asc' },
       }),
     ]);
     const latestMetrics = new Map(getLatestBy(metrics, 'shopeeItemId').map((metric) => [metric.shopeeItemId, metric]));
@@ -159,7 +175,7 @@ class SnapshotService {
       source: SOURCE.SHOPEE,
       dataAsOf,
       connectionReady: Boolean(session),
-      hasData: total > 0,
+      hasData: categoryRows.length > 0,
       failedAt: latestShopeeLog?.status === 'FAILED' ? latestShopeeLog.timestamp : null,
       freshnessMinutes: 45,
     });
@@ -175,6 +191,10 @@ class SnapshotService {
           platformFeePercent: product.platformFeePercent,
         },
       })),
+      filters: {
+        categories: categoryRows.map((row) => row.category).filter(Boolean),
+        activeCategory: selectedCategory,
+      },
       pagination: { page: safePage, limit: safeLimit, total, totalPages: Math.max(1, Math.ceil(total / safeLimit)) },
       meta,
     };
