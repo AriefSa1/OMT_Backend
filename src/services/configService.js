@@ -5,13 +5,12 @@ const DEFAULTS = {
   cookieString: '',
   geminiApiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
   cronInterval: process.env.CRON_INTERVAL || '15m',
-  warehouseLoginUrl: process.env.WAREHOUSE_LOGIN_URL || '',
-  warehouseInventoryUrl: process.env.WAREHOUSE_INVENTORY_URL || '',
+  warehouseLoginUrl: process.env.WAREHOUSE_LOGIN_URL || 'https://pdcgudang.et.r.appspot.com/v1/users/login',
+  warehouseInventoryUrl: process.env.WAREHOUSE_INVENTORY_URL || 'https://pdcgudang.et.r.appspot.com/v1/products/list',
   warehouseUsername: process.env.WAREHOUSE_USERNAME || '',
   warehousePassword: process.env.WAREHOUSE_PASSWORD || '',
   warehouseLoginFrom: process.env.WAREHOUSE_LOGIN_FROM || 'selling',
   shopeeAdsUrl: process.env.SHOPEE_ADS_ENDPOINT || '',
-  shopeeOrderSummaryUrl: process.env.SHOPEE_ORDER_SUMMARY_ENDPOINT || '',
 };
 
 class ConfigService {
