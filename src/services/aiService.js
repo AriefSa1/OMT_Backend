@@ -1,5 +1,49 @@
 const { GoogleGenAI } = require('@google/genai');
 
+/**
+ * Sorts a Gemini failure into what the caller can actually do about it.
+ *
+ * The SDK throws an `ApiError` with a numeric `.status` and a JSON-encoded `.message`.
+ * `RATE_LIMITED` (429) is the common case on the free tier and is retryable — Google
+ * itself returns a `retryDelay` naming how long to wait, and empirically a retry after
+ * that delay often succeeds despite the quota's `PerDay` name. `UNAVAILABLE` (5xx) is a
+ * transient outage, also worth one retry. Everything else (bad request, a response that
+ * was not the JSON we asked for) is not: retrying would just repeat the same failure.
+ */
+function classifyGeminiError(err) {
+  const status = Number(err?.status);
+  let retryDelaySeconds = null;
+  try {
+    const parsed = JSON.parse(err?.message || '{}');
+    const detail = parsed?.error?.details?.find((d) => d['@type']?.includes('RetryInfo'));
+    const match = /^(\d+(?:\.\d+)?)s$/.exec(detail?.retryDelay || '');
+    if (match) retryDelaySeconds = Number(match[1]);
+  } catch {
+    // err.message was not the SDK's JSON envelope (e.g. our own JSON.parse of a bad
+    // model response) — fall through with no retry delay.
+  }
+
+  if (status === 429) {
+    return {
+      code: 'RATE_LIMITED',
+      retryable: true,
+      retryDelaySeconds: retryDelaySeconds ?? 15,
+      message: 'Kuota Gemini API sedang penuh. Sistem mencoba lagi secara otomatis.',
+    };
+  }
+  if (status >= 500 && status < 600) {
+    return { code: 'UNAVAILABLE', retryable: true, retryDelaySeconds: retryDelaySeconds ?? 5, message: 'Layanan Gemini sedang tidak stabil. Sistem mencoba lagi secara otomatis.' };
+  }
+  if (err instanceof SyntaxError) {
+    return { code: 'INVALID_RESPONSE', retryable: false, retryDelaySeconds: 0, message: 'Gemini mengembalikan respons yang tidak dapat dibaca.' };
+  }
+  return { code: status ? `HTTP_${status}` : 'UNKNOWN', retryable: false, retryDelaySeconds: 0, message: 'Permintaan ke Gemini gagal.' };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 class AIService {
   constructor() {
     this.apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
@@ -45,12 +89,19 @@ class AIService {
     };
   }
 
-  /** Gemini was configured but the request or its response failed. */
-  aiFailed(payload = {}, message = 'Permintaan ke Gemini gagal.') {
+  /**
+   * Gemini was configured but the request or its response failed, even after the retries
+   * in `generateJson` were exhausted. `errorCode` carries `classifyGeminiError`'s verdict
+   * (e.g. `RATE_LIMITED`) so the frontend can show a specific reason instead of a generic
+   * "gagal" — the difference between "kuota API habis, sistem sudah mencoba lagi" and an
+   * actual defect matters to whoever is looking at the screen.
+   */
+  aiFailed(payload = {}, message = 'Permintaan ke Gemini gagal.', errorCode = 'UNKNOWN') {
     return {
       ...payload,
       success: false,
       provider: 'ERROR',
+      errorCode,
       model: this.modelName,
       message,
     };
@@ -70,17 +121,60 @@ class AIService {
     };
   }
 
-  async generateJson(prompt) {
+  /**
+   * One call to Gemini, retried up to `maxRetries` times when `classifyGeminiError` says
+   * the failure is transient (429 quota/rate limit, 5xx outage) — waiting the delay
+   * Google itself names in the error. A non-retryable failure (bad request, unparsable
+   * response) throws immediately on the first attempt; there is nothing a retry would fix.
+   *
+   * The thrown error always carries `.aiErrorCode`/`.aiErrorMessage` (from the last
+   * classification attempted) so every caller can build a specific envelope without
+   * re-deriving it.
+   */
+  async generateJson(prompt, { maxRetries = 2 } = {}) {
     if (!this.ai) return null;
 
-    const response = await this.ai.models.generateContent({
-      model: this.modelName,
-      contents: prompt,
-    });
+    let lastClassified = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        const response = await this.ai.models.generateContent({ model: this.modelName, contents: prompt });
+        const text = response.text || '';
+        const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        return JSON.parse(cleaned);
+      } catch (err) {
+        lastClassified = classifyGeminiError(err);
+        const attemptsLeft = attempt < maxRetries;
+        if (!lastClassified.retryable || !attemptsLeft) {
+          const finalError = new Error(err.message);
+          finalError.aiErrorCode = lastClassified.code;
+          finalError.aiErrorMessage = lastClassified.message;
+          throw finalError;
+        }
+        console.warn(`[AI Service] ${lastClassified.code}, retrying in ${lastClassified.retryDelaySeconds}s (attempt ${attempt + 1}/${maxRetries})`);
+        await sleep(Math.min(lastClassified.retryDelaySeconds, 20) * 1000);
+      }
+    }
+    // Unreachable — the loop always returns or throws — but keeps the function's type honest.
+    throw new Error('generateJson exhausted retries without a classified error.');
+  }
 
-    const text = response.text || '';
-    const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(cleaned);
+  /**
+   * Shared shape behind every FITUR method below: call Gemini, and on failure build the
+   * envelope from what `generateJson` classified rather than a fixed message. Each caller
+   * still owns its own input validation and `notConfigured`/`missingInput` guards — those
+   * differ per feature — this only removes the identical try/catch/log/envelope tail that
+   * used to be copied five times.
+   */
+  async callGemini({ prompt, trusted = {}, fallbackPayload = {}, failMessage, logLabel }) {
+    try {
+      const parsed = await this.generateJson(prompt);
+      return this.aiResult(parsed, trusted);
+    } catch (err) {
+      const code = err.aiErrorCode || 'UNKNOWN';
+      const message = code === 'RATE_LIMITED' || code === 'UNAVAILABLE' ? err.aiErrorMessage : (failMessage || err.aiErrorMessage);
+      console.warn(`[AI Service] ${logLabel || 'Gemini'} error (${code}): ${err.message}`);
+      return this.aiFailed({ ...trusted, ...fallbackPayload }, message, code);
+    }
   }
 
   // 3. FITUR 1: AI Automated Copywriter & A/B Testing Variations Generator
@@ -89,8 +183,12 @@ class AIService {
       return this.notConfigured({ productName: name, variations: [] });
     }
 
-    try {
-      const parsed = await this.generateJson(`Anda adalah Copywriter E-commerce Senior Shopee Indonesia.
+    return this.callGemini({
+      logLabel: 'A/B copy',
+      trusted: { productName: name },
+      fallbackPayload: { variations: [] },
+      failMessage: 'Gagal membuat variasi A/B copy.',
+      prompt: `Anda adalah Copywriter E-commerce Senior Shopee Indonesia.
 Buat 3 variasi copywriting A/B Testing lengkap untuk produk berikut:
 Nama: "${name}"
 Kategori: "${category}"
@@ -131,16 +229,8 @@ Kembalikan JSON murni dengan 3 variasi (SEO_OPTIMIZED, PROMO_DRIVEN, EMOTIONAL_B
     }
   ],
   "confidenceScore": 96
-}`);
-
-      return this.aiResult(parsed, { productName: name });
-    } catch (err) {
-      console.warn(`[AI Service] Gemini A/B copy error: ${err.message}`);
-      return this.aiFailed(
-        { productName: name, variations: [] },
-        'Gagal membuat variasi A/B copy.'
-      );
-    }
+}`,
+    });
   }
 
   // 4. FITUR 2: AI Predictive Restock & Deadstock Liquidation Playbook
@@ -181,8 +271,14 @@ Kembalikan JSON murni dengan 3 variasi (SEO_OPTIMIZED, PROMO_DRIVEN, EMOTIONAL_B
       return this.notConfigured({ sku, productName: name, metrics });
     }
 
-    try {
-      const parsed = await this.generateJson(`Anda adalah pakar Supply Chain & Inventory Analytics E-commerce Shopee.
+    return this.callGemini({
+      logLabel: 'predictive restock',
+      // metrics passed as trusted on both success and failure: model output must never
+      // overwrite the arithmetic this service computed itself.
+      trusted: { sku, productName: name, metrics },
+      fallbackPayload: { liquidationPlaybook: null },
+      failMessage: 'Gagal menganalisis prediksi restock.',
+      prompt: `Anda adalah pakar Supply Chain & Inventory Analytics E-commerce Shopee.
 Analisis data persediaan berikut:
 Produk: "${name}" (SKU: ${sku}, Kategori: ${category})
 Total Stok Tersedia: ${totalPhysicalStock} unit
@@ -202,17 +298,8 @@ Kembalikan JSON murni:
     "actionSteps": ["Langkah 1", "Langkah 2", "Langkah 3"]
   },
   "marketDemandForecast": "Proyeksi tren permintaan 30 hari ke depan"
-}`);
-
-      // metrics passed as trusted: model output must not overwrite our arithmetic.
-      return this.aiResult(parsed, { sku, productName: name, metrics });
-    } catch (err) {
-      console.warn(`[AI Service] Gemini predictive restock error: ${err.message}`);
-      return this.aiFailed(
-        { sku, productName: name, metrics, liquidationPlaybook: null },
-        'Gagal menganalisis prediksi restock.'
-      );
-    }
+}`,
+    });
   }
 
   // 5. FITUR 3: AI Dynamic Pricing & Profit-Margin Simulator
@@ -267,8 +354,11 @@ Kembalikan JSON murni:
       return this.notConfigured({ productName: name, input, calculations });
     }
 
-    try {
-      const parsed = await this.generateJson(`Anda adalah Pricing Strategist E-commerce Shopee Indonesia.
+    return this.callGemini({
+      logLabel: 'pricing simulator',
+      trusted: { productName: name, input, calculations },
+      failMessage: 'Gagal mengambil rekomendasi harga dari Gemini. Perhitungan margin tetap ditampilkan.',
+      prompt: `Anda adalah Pricing Strategist E-commerce Shopee Indonesia.
 Analisis simulasi penetapan harga produk berikut:
 Produk: "${name}"
 Harga Uji Coba: Rp ${price.toLocaleString('id-ID')} (Harga Asli: Rp ${Number(currentPrice).toLocaleString('id-ID')})
@@ -288,16 +378,8 @@ Kembalikan JSON murni:
     "promotionalDiscountBudget": 15000,
     "actionStrategy": "Rekomendasi taktis untuk menaikkan volume penjualan tanpa mengorbankan margin"
   }
-}`);
-
-      return this.aiResult(parsed, { productName: name, input, calculations });
-    } catch (err) {
-      console.warn(`[AI Service] Gemini pricing simulator error: ${err.message}`);
-      return this.aiFailed(
-        { productName: name, input, calculations },
-        'Gagal mengambil rekomendasi harga dari Gemini. Perhitungan margin tetap ditampilkan.'
-      );
-    }
+}`,
+    });
   }
 
   // 6. FITUR 4: AI Automated Daily Store Briefing (Executive Digest)
@@ -327,8 +409,14 @@ Kembalikan JSON murni:
       return this.notConfigured({ date: todayStr, criticalAlerts });
     }
 
-    try {
-      const parsed = await this.generateJson(`Anda adalah AI Chief Operating Officer (COO) untuk Seller Shopee Indonesia.
+    return this.callGemini({
+      logLabel: 'daily briefing',
+      trusted: { date: todayStr },
+      // criticalAlerts are derived from real roas/discrepancies above, so they must
+      // survive a Gemini failure too — not just the notConfigured path.
+      fallbackPayload: { criticalAlerts },
+      failMessage: 'Gagal menyusun briefing harian.',
+      prompt: `Anda adalah AI Chief Operating Officer (COO) untuk Seller Shopee Indonesia.
 Analisis snapshot toko hari ini (${todayStr}).
 Nilai bertanda "belum tersedia" berarti sumber datanya belum tersinkron — JANGAN mengarang angka untuk itu, dan jangan menyimpulkan performa dari data yang tidak ada.
 - Total GMV Terakhir: ${orUnknown(gmv, (v) => `Rp ${v.toLocaleString('id-ID')}`)}
@@ -353,16 +441,8 @@ Kembalikan JSON murni:
     "Aksi Prioritas 3"
   ],
   "marketOutlook": "Proyeksi perilaku pembeli dan jam ramai hari ini"
-}`);
-
-      return this.aiResult(parsed, { date: todayStr });
-    } catch (err) {
-      console.warn(`[AI Service] Gemini daily briefing error: ${err.message}`);
-      return this.aiFailed(
-        { date: todayStr, criticalAlerts },
-        'Gagal menyusun briefing harian.'
-      );
-    }
+}`,
+    });
   }
 
   // 7. FITUR 5: AI Ads Negative Keyword & Bid Optimization
@@ -379,8 +459,12 @@ Kembalikan JSON murni:
       return this.notConfigured({ campaignName, summary, isUnderperforming });
     }
 
-    try {
-      const parsed = await this.generateJson(`Anda adalah AI Performance Marketing Shopee Ads Bidding Expert.
+    return this.callGemini({
+      logLabel: 'ads optimization',
+      trusted: { campaignName, summary },
+      fallbackPayload: { negativeKeywordsToExclude: [], bidAdjustments: [], scaleKeywordsRecommended: [] },
+      failMessage: 'Gagal menganalisis kampanye iklan.',
+      prompt: `Anda adalah AI Performance Marketing Shopee Ads Bidding Expert.
 Analisis metrik kampanye iklan berikut:
 Kampanye: "${campaignName}" (Kategori: ${category})
 Biaya: Rp ${Number(spend).toLocaleString('id-ID')}
@@ -403,18 +487,9 @@ Kembalikan JSON murni:
     { "keyword": "kata kunci target 2", "matchType": "Pencocokan Spesifik", "suggestedBid": 1300, "estimatedSearchVolume": "Sedang" }
   ],
   "dailyBudgetStrategy": "Rekomendasi taktis anggaran harian"
-}`);
-
-      return this.aiResult(parsed, { campaignName, summary });
-    } catch (err) {
-      console.warn(`[AI Service] Gemini ads optimization error: ${err.message}`);
-      return this.aiFailed(
-        { campaignName, summary, negativeKeywordsToExclude: [], bidAdjustments: [], scaleKeywordsRecommended: [] },
-        'Gagal menganalisis kampanye iklan.'
-      );
-    }
+}`,
+    });
   }
-
 }
 
 module.exports = new AIService();

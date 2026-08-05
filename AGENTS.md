@@ -34,6 +34,15 @@ npm run prisma:migrate:deploy
 
 `prisma:db:push` no longer exists and must not be reintroduced — see constraint 5 below.
 
+```bash
+npm run test:ai
+```
+
+Mocked regression suite for the AI feature (retry/quota classification, response
+envelope). Makes zero live Gemini calls — safe to run any time. `npm run docs:ai` prints
+a terminal-readable explainer of the AI feature; the full reference is
+`docs/AI_SERVICE.md`.
+
 ## Coding Style & Naming Conventions
 
 Use CommonJS modules (`require`, `module.exports`) and two-space indentation. Keep filenames feature-based: routes end in `Routes.js`, controllers in `Controller.js`, and services in `Service.js`. Use `camelCase` for variables and functions, `PascalCase` for classes or constructors, and uppercase names for static constants.
@@ -183,6 +192,40 @@ fixed sentence, and `productSignalsMeta` carries the reason when nothing was mea
 catalog, not the whole catalog, and the UI has to be able to say so.
 
 Verify all of the above with `node test_phase5_verification.js` (read-only, no sync).
+
+## AI feature — fixed 2026-08-05
+
+"Mayoritas fitur AI tidak bisa digunakan" traced to a real, measured cause, not a code
+defect: the Gemini key in use is on the free tier's
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier` quota — **20 requests/day** for
+`gemini-2.5-flash`. Live-testing all 5 `aiService.js` functions the same day this was
+diagnosed produced 4 immediate 429s out of 5 calls.
+
+Two things made it worse than the raw quota number:
+
+1. **No retry.** A 429 is often transient — a second attempt seconds later would
+   succeed — but the old code gave up on the first failure. `aiService.js` now retries
+   up to twice, waiting the `retryDelay` Gemini itself returns (`classifyGeminiError` +
+   `generateJson`), and only reports failure once retries are genuinely exhausted. A
+   non-retryable failure (bad request, unparsable model output) still fails on the first
+   attempt — see `docs/AI_SERVICE.md` for the full classification table.
+2. **The daily briefing fired on every dashboard visit, uncached.** It runs
+   automatically on mount — unlike the other four AI features, which wait for a click —
+   so simply browsing the dashboard repeatedly could burn the day's quota before a user
+   ever tried anything else. `frontend/lib/api.js` now caches it for 10 minutes;
+   `frontend/components/DailyBriefingCard.jsx`'s refresh button bypasses the cache.
+
+Also cleaned up while in this file: `aiController.js`'s five near-identical
+try/catch/setApiKey handlers collapsed into one `aiEndpoint(...)` factory; five identical
+try/catch tails inside `aiService.js` collapsed into `callGemini(...)`;
+`test-ai-suite.js` (previously live-called all 5 features, spending real quota on every
+"test" run) replaced with a mocked regression suite; `test_ai_gemini.js` (pointed at
+routes that no longer exist) deleted.
+
+No amount of code can restore a quota that is already spent for the day — the fixes
+above stop the app from spending it needlessly and make a real exhaustion say so plainly
+(`errorCode: 'RATE_LIMITED'`) instead of a generic "gagal". Full write-up:
+`docs/AI_SERVICE.md`; `npm run docs:ai` for a terminal summary.
 
 ## Remaining, in order
 

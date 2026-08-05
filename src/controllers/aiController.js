@@ -2,69 +2,56 @@ const aiService = require('../services/aiService');
 const snapshotService = require('../services/snapshotService');
 const { wrapHandlers } = require('../utils/asyncHandler');
 
-// 1. A/B Testing Copywriter
-async function generateABCopy(req, res) {
-  try {
-    const { name, category, price, description, targetAudience, geminiApiKey } = req.body;
-    if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-    const result = await aiService.generateABTestCopy({
-      name,
-      category,
-      price,
-      description,
-      targetAudience,
-    });
-    return res.json(result);
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
+/**
+ * Every FITUR endpoint below shares one shape: optionally override the Gemini key for
+ * this request (Settings can save a key without restarting the server), call one
+ * aiService method with a fixed slice of the request body, and return its envelope
+ * untouched — aiService.js already encodes success/failure/provider/errorCode, so this
+ * layer must not re-wrap it.
+ *
+ * `pickArgs` names exactly the fields each feature reads, the same way the original
+ * per-endpoint destructuring did — nothing is passed through blind.
+ *
+ * To add a new AI endpoint: write the method on aiService, then one line here —
+ * `const myEndpoint = aiEndpoint('myServiceMethod', ({ a, b }) => ({ a, b }));` — and
+ * export + route it. See docs/AI_SERVICE.md for the full walkthrough.
+ */
+function aiEndpoint(serviceMethod, pickArgs) {
+  return async function handler(req, res) {
+    try {
+      const { geminiApiKey } = req.body;
+      if (geminiApiKey) aiService.setApiKey(geminiApiKey);
+      const result = await aiService[serviceMethod](pickArgs(req.body));
+      return res.json(result);
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  };
 }
+
+// 1. A/B Testing Copywriter
+const generateABCopy = aiEndpoint('generateABTestCopy', ({ name, category, price, description, targetAudience }) => (
+  { name, category, price, description, targetAudience }
+));
 
 // 2. Predictive Restock & Liquidation
-async function predictRestock(req, res) {
-  try {
-    const { name, sku, stock, salesCount, warehouseStock, leadTimeDays, category, geminiApiKey } = req.body;
-    if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-    const result = await aiService.predictRestockAndLiquidation({
-      name,
-      sku,
-      stock,
-      salesCount,
-      warehouseStock,
-      leadTimeDays,
-      category,
-    });
-    return res.json(result);
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
+const predictRestock = aiEndpoint('predictRestockAndLiquidation', ({ name, sku, stock, salesCount, warehouseStock, leadTimeDays, category }) => (
+  { name, sku, stock, salesCount, warehouseStock, leadTimeDays, category }
+));
 
 // 3. Dynamic Pricing Simulator
-async function simulatePricing(req, res) {
-  try {
-    const { name, currentPrice, targetPrice, unitCost, unitAdCost, shippingCost, platformFeePercent, competitorPrice, geminiApiKey } = req.body;
-    if (geminiApiKey) aiService.setApiKey(geminiApiKey);
+const simulatePricing = aiEndpoint('simulateDynamicPricing', ({ name, currentPrice, targetPrice, unitCost, unitAdCost, shippingCost, platformFeePercent, competitorPrice }) => (
+  { name, currentPrice, targetPrice, unitCost, unitAdCost, shippingCost, platformFeePercent, competitorPrice }
+));
 
-    const result = await aiService.simulateDynamicPricing({
-      name,
-      currentPrice,
-      targetPrice,
-      unitCost,
-      unitAdCost,
-      shippingCost,
-      platformFeePercent,
-      competitorPrice,
-    });
-    return res.json(result);
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
+// 5. Ads Keyword & Bid Optimizer
+const optimizeAdsKeywords = aiEndpoint('optimizeAdsKeywordsAndBids', ({ campaignName, spend, sales, roas, ctr, category }) => (
+  { campaignName, spend, sales, roas, ctr, category }
+));
 
-// 4. Daily Briefing
+// 4. Daily Briefing — kept as its own function: unlike the four above, it does not take
+// a request body, it composes three snapshots first, and its response shape wraps the
+// service result inside `briefing` rather than returning it directly.
 async function getDailyBriefing(req, res) {
   try {
     const [overview, ads, warehouse] = await Promise.all([
@@ -93,26 +80,6 @@ async function getDailyBriefing(req, res) {
         lastSyncedAt: overview.lastSyncedAt,
       },
     });
-  } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
-}
-
-// 5. Ads Keyword & Bid Optimizer
-async function optimizeAdsKeywords(req, res) {
-  try {
-    const { campaignName, spend, sales, roas, ctr, category, geminiApiKey } = req.body;
-    if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-    const result = await aiService.optimizeAdsKeywordsAndBids({
-      campaignName,
-      spend,
-      sales,
-      roas,
-      ctr,
-      category,
-    });
-    return res.json(result);
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
