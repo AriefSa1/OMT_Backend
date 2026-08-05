@@ -1327,8 +1327,25 @@ class WarehouseService {
       take: 10,
     });
 
+    // 3b. The warehouse itself knows both directions; the local table only ever holds
+    // outbound rows. Fail-soft: the detail view must still open when this call cannot.
+    const flow = item
+      ? await this.fetchVariantStockFlow({
+        productId: item.rawProductId,
+        variantId: item.rawVariationId,
+        sku: item.sku,
+      }).catch((err) => ({ source: 'UNAVAILABLE', rows: [], message: err.message }))
+      : { source: 'UNAVAILABLE', rows: [], message: null };
+    const liveFlow = flow.source === 'WAREHOUSE_API' && flow.rows.length > 0;
+    const shownMovements = liveFlow ? flow.rows : movements;
+
     // Compute stock stats
-    const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
+    const localTotalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
+    const flowTotals = liveFlow ? this.summariseMovements(flow.rows) : null;
+    const totalOut = flowTotals ? flowTotals.totalOut : localTotalOut;
+    // Without the live flow there is no inbound source at all, so this is unmeasured —
+    // null, never 0, which would read as "nothing ever came in".
+    const totalIn = flowTotals ? flowTotals.totalIn : null;
     const currentStock = item ? item.availableStock : 0;
     const valuation = item ? (item.priceMin || 0) * (item.totalStock || 0) : 0;
 
@@ -1348,17 +1365,33 @@ class WarehouseService {
       product: item,
       shopeeProduct,
       stats: {
+        totalIn,
         totalOut,
         currentStock,
         valuation,
-        movementCount: movements.length,
+        movementCount: shownMovements.length,
       },
-      movements,
-      movementAvailability: {
-        inbound: false,
-        outbound: true,
-        message: 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
-      },
+      movements: shownMovements,
+      movementAvailability: liveFlow
+        ? {
+          inbound: true,
+          outbound: true,
+          source: 'PDC_GUDANG',
+          // The totals above cover this window only. A variant can hold tens of thousands
+          // of rows, so calling them lifetime totals would be a claim we cannot support.
+          window: {
+            rows: flow.rows.length,
+            totalItems: flow.totalItems,
+            complete: flow.totalItems <= flow.rows.length,
+          },
+          message: null,
+        }
+        : {
+          inbound: false,
+          outbound: true,
+          source: 'LOCAL_SNAPSHOT',
+          message: flow.message || 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
+        },
       snapshots,
       reconciliations,
       warehouseSkuDetail,
@@ -1367,31 +1400,165 @@ class WarehouseService {
     };
   }
 
-  async getProductStockHistory(sku, { limit = 50, type = null } = {}) {
-    const requestedType = type ? type.toUpperCase() : 'OUT';
-    const movementAvailability = {
-      inbound: false,
-      outbound: true,
-      message: 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
-    };
-    if (requestedType === 'IN') {
-      return { sku, totalOut: 0, count: 0, movements: [], movementAvailability };
+  /**
+   * Movement history for one variant, straight from PDC Gudang
+   * (warehouse_endpoint.json -> /v1/invertories/stock_flow).
+   *
+   * Both ids are required: `product_id` on its own makes the endpoint hang past the
+   * timeout, while `product_id` + `variant_id` answers immediately.
+   *
+   * These rows carry the direction our own `StockMovement` table never recorded —
+   * `restock` and `return` arrive with a positive count, `order` with a negative one —
+   * which is the reason a stock-in figure could previously only ever be zero.
+   */
+  async fetchVariantStockFlow({ productId, variantId, sku = '', limit = 100, page = 1 } = {}) {
+    if (!productId || !variantId) {
+      return { source: 'UNAVAILABLE', rows: [], message: 'Varian ini belum memiliki id produk/varian gudang, sehingga riwayat mutasi tidak dapat diambil.' };
+    }
+    if (!this.isLoginConfigured()) {
+      return { source: 'UNAVAILABLE', rows: [], message: 'Koneksi gudang belum dikonfigurasi di Pengaturan.' };
     }
 
-    const movements = await prisma.stockMovement.findMany({
+    let origin = 'https://pdcgudang.et.r.appspot.com';
+    try {
+      origin = new URL(this.inventoryUrl || this.loginUrl || origin).origin;
+    } catch {
+      // keep the default origin
+    }
+    // The endpoint pages, and a busy variant can hold tens of thousands of rows, so what
+    // comes back is a window over the history — never the whole of it.
+    const safeLimit = Math.min(200, Math.max(1, Number(limit) || 100));
+    const safePage = Math.max(1, Number(page) || 1);
+    const url = `${origin}/v1/invertories/stock_flow?product_id=${encodeURIComponent(productId)}&variant_id=${encodeURIComponent(variantId)}&limit=${safeLimit}&page=${safePage}`;
+
+    try {
+      const payload = await this.fetchAuthenticatedData(url);
+      const rows = Array.isArray(payload?.data) ? payload.data : [];
+      const info = payload?.page_info || {};
+      const totalItems = Number(info.total_items);
+      return {
+        source: 'WAREHOUSE_API',
+        rows: rows.map((row, index) => this.normalizeStockFlowRow(row, sku, index)),
+        page: Number(info.current_page) || safePage,
+        limit: safeLimit,
+        totalItems: Number.isFinite(totalItems) ? totalItems : rows.length,
+        totalPages: Number(info.total_page) || 1,
+        message: null,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'UNAVAILABLE',
+        rows: [],
+        message: status === 403 || status === 500
+          ? 'Akun gudang ini tidak memiliki izin membaca riwayat mutasi varian.'
+          : `Riwayat mutasi gudang tidak dapat diambil${status ? ` (HTTP ${status})` : ''}.`,
+      };
+    }
+  }
+
+  normalizeStockFlowRow(row, sku, index) {
+    const count = Number(row?.count) || 0;
+    const flowType = String(row?.type || '').toLowerCase();
+    const status = String(row?.status || '').toLowerCase();
+    const labels = {
+      restock: 'Restock masuk',
+      return: 'Retur masuk',
+      order: 'Pesanan keluar',
+      transfer_in: 'Transfer masuk',
+      transfer_out: 'Transfer keluar',
+    };
+    // The sign is not a direction: only `order` arrives negative. A `transfer_out` comes
+    // back with a positive count exactly like `transfer_in`, so reading the sign counted
+    // outgoing transfers as stock received. Direction comes from the type.
+    const DIRECTION = {
+      restock: 'IN',
+      return: 'IN',
+      transfer_in: 'IN',
+      order: 'OUT',
+      transfer_out: 'OUT',
+    };
+    const warehouseId = Number(row?.sku_data?.warehouse_id) || null;
+    const warehouse = ACTIVE_WAREHOUSES.find((entry) => entry.id === warehouseId);
+    return {
+      id: `FLOW-${row?.sku_id || sku || 'sku'}-${row?.created || index}-${index}`,
+      sku: sku || row?.sku_id || '',
+      // An unrecognised type falls back to the sign, and only when the sign is decisive.
+      type: DIRECTION[flowType] || (count < 0 ? 'OUT' : count > 0 ? 'IN' : 'UNKNOWN'),
+      warehouseId,
+      warehouseName: warehouse?.name || (warehouseId ? `Gudang ${warehouseId}` : ''),
+      flowType,
+      quantity: Math.abs(count),
+      status,
+      // A cancelled row never moved stock. It stays visible, but totals must skip it.
+      counted: status === 'completed',
+      reference: row?.receipt || '',
+      source: 'PDC_GUDANG',
+      note: `${labels[flowType] || flowType || 'Mutasi'}${status && status !== 'completed' ? ` (${status})` : ''}`,
+      timestamp: row?.created || null,
+      sentAt: row?.send_at || null,
+      arrivedAt: row?.arrived || null,
+      actor: row?.create_by?.username || row?.create_by?.name || '',
+    };
+  }
+
+  summariseMovements(rows) {
+    const counted = rows.filter((row) => row.counted !== false);
+    const sum = (direction) => counted
+      .filter((row) => row.type === direction)
+      .reduce((total, row) => total + Number(row.quantity || 0), 0);
+    return { totalIn: sum('IN'), totalOut: sum('OUT') };
+  }
+
+  async getProductStockHistory(sku, { limit = 50, type = null } = {}) {
+    const requestedType = type ? type.toUpperCase() : null;
+    const item = await prisma.warehouseItem.findFirst({ where: { sku } });
+    const flow = await this.fetchVariantStockFlow({
+      productId: item?.rawProductId,
+      variantId: item?.rawVariationId,
+      sku,
+      limit,
+    });
+
+    if (flow.source === 'WAREHOUSE_API' && flow.rows.length) {
+      const rows = requestedType ? flow.rows.filter((row) => row.type === requestedType) : flow.rows;
+      const totals = this.summariseMovements(rows);
+      return {
+        sku,
+        totalIn: totals.totalIn,
+        totalOut: totals.totalOut,
+        count: rows.length,
+        movements: rows,
+        movementAvailability: {
+          inbound: true,
+          outbound: true,
+          source: 'PDC_GUDANG',
+          window: { rows: flow.rows.length, totalItems: flow.totalItems, complete: flow.totalItems <= flow.rows.length },
+          message: null,
+        },
+      };
+    }
+
+    // Fallback: the locally recorded movements, which only ever contain outbound rows.
+    // totalIn stays null — unmeasured, not zero.
+    const movements = requestedType === 'IN' ? [] : await prisma.stockMovement.findMany({
       where: { sku, type: 'OUT' },
       orderBy: { timestamp: 'desc' },
       take: Number(limit) || 50,
     });
 
-    const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
-
     return {
       sku,
-      totalOut,
+      totalIn: null,
+      totalOut: movements.reduce((acc, movement) => acc + movement.quantity, 0),
       count: movements.length,
       movements,
-      movementAvailability,
+      movementAvailability: {
+        inbound: false,
+        outbound: true,
+        source: 'LOCAL_SNAPSHOT',
+        message: flow.message || 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
+      },
     };
   }
 
