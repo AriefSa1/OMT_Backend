@@ -1,9 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
 const {
-  generateTitle,
-  generateStoreCopy,
-  generateAds,
   generateABCopy,
   predictRestock,
   simulatePricing,
@@ -15,12 +12,6 @@ const router = express.Router();
 
 router.use(authMiddleware);
 
-// Legacy routes
-router.post('/generate-title', generateTitle);
-router.post('/generate-store-copy', generateStoreCopy);
-router.post('/generate-ads-keywords', generateAds);
-
-// 5 New AI feature routes
 router.post('/ab-copy', generateABCopy);
 router.post('/predictive-restock', predictRestock);
 router.post('/pricing-simulator', simulatePricing);

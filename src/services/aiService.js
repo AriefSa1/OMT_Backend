@@ -17,12 +17,56 @@ class AIService {
     return Boolean(this.ai);
   }
 
-  notConfigured(payload) {
+  /**
+   * No Gemini key configured. Returns deterministic values the caller computed itself
+   * (metrics, calculations) but NEVER invented advice, scores or recommendations —
+   * those would be indistinguishable from real model output on screen.
+   *
+   * Payload is spread FIRST so it can never overwrite the envelope keys.
+   */
+  notConfigured(payload = {}) {
     return {
+      ...payload,
       success: false,
       provider: 'NOT_CONFIGURED',
       model: this.modelName,
+      message: 'Kunci API Gemini belum dikonfigurasi. Buka Pengaturan untuk mengaktifkan fitur AI.',
+    };
+  }
+
+  /** A required input was not supplied, so nothing was computed. */
+  missingInput(payload = {}, message = 'Data masukan belum lengkap.') {
+    return {
       ...payload,
+      success: false,
+      provider: 'MISSING_INPUT',
+      model: this.modelName,
+      message,
+    };
+  }
+
+  /** Gemini was configured but the request or its response failed. */
+  aiFailed(payload = {}, message = 'Permintaan ke Gemini gagal.') {
+    return {
+      ...payload,
+      success: false,
+      provider: 'ERROR',
+      model: this.modelName,
+      message,
+    };
+  }
+
+  /**
+   * Live model result. `parsed` is spread FIRST so model output cannot overwrite the
+   * envelope, nor the deterministic blocks the caller passes in `trusted`.
+   */
+  aiResult(parsed, trusted = {}) {
+    return {
+      ...parsed,
+      ...trusted,
+      success: true,
+      provider: 'REAL_GEMINI_API',
+      model: this.modelName,
     };
   }
 
@@ -39,154 +83,10 @@ class AIService {
     return JSON.parse(cleaned);
   }
 
-  // 1. Product SEO & Title Generator
-  async generateProductSEO(productName, category = 'Women Fashion') {
-    if (!this.ai) {
-      return this.notConfigured({
-        originalTitle: productName,
-        aiGeneratedTitle: `[BEST SELLER] ${productName} - Premium Quality`,
-        seoScore: 85,
-        suggestedKeywords: [productName, category, 'kualitas premium', 'terbaru 2026', 'promo shopee'],
-        pricingAnalysis: {
-          suggestedDiscountPercent: '10%',
-          estimatedConversionBoost: '+20%',
-        },
-        message: 'Configure a Gemini API key in Settings to generate live product SEO recommendations.',
-      });
-    }
-
-    try {
-      const parsed = await this.generateJson(`Anda adalah pakar e-commerce Shopee Indonesia.
-Optimasi produk berikut untuk listing Shopee:
-Nama Produk Asli: "${productName}"
-Kategori: "${category}"
-
-Kembalikan JSON murni:
-{
-  "aiGeneratedTitle": "Judul baru maksimal 100 karakter yang SEO-friendly",
-  "seoScore": 95,
-  "suggestedKeywords": ["keyword 1", "keyword 2", "keyword 3", "keyword 4"],
-  "pricingAnalysis": {
-    "suggestedDiscountPercent": "15%",
-    "estimatedConversionBoost": "+28%"
-  }
-}`);
-
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        originalTitle: productName,
-        ...parsed,
-      };
-    } catch (err) {
-      console.warn(`[AI Service] Gemini product SEO error: ${err.message}`);
-      return this.notConfigured({
-        originalTitle: productName,
-        aiGeneratedTitle: `[PREMIUM] ${productName} - Pilihan Terbaik`,
-        seoScore: 80,
-        suggestedKeywords: [productName, category, 'promo'],
-        pricingAnalysis: null,
-        message: 'Gemini request encountered an issue. Fallback data shown.',
-      });
-    }
-  }
-
-  // 2. Store Copywriting
-  async generateStoreCopywriting(storeName = 'Shopee Store') {
-    if (!this.ai) {
-      return this.notConfigured({
-        storeBio: `Selamat datang di toko resmi ${storeName}! Kami menghadirkan produk fashion & apparel wanita berkualitas dengan harga terjangkau. Pengiriman cepat & amanah!`,
-        autoReplies: [
-          { trigger: 'Tanya Stok', response: 'Halo Kak! Seluruh produk yang bisa di-klik siap kirim ya. Silakan langsung di-checkout sebelum kehabisan!' },
-          { trigger: 'Pengiriman', response: 'Pesanan masuk sebelum jam 15.00 WIB dikirim di hari yang sama ya Kak. Terima kasih!' },
-          { trigger: 'Komplain/Retur', response: 'Mohon sertakan video unboxing utuh saat paket dibuka ya Kak, tim kami siap bantu retur jika ada kendala.' },
-        ],
-        bannerSlogans: ['Tampil Cantik Setiap Hari', 'Kualitas Butik Harga Terbaik', 'Flash Sale & Promo Eksklusif'],
-        message: 'Configure a Gemini API key in Settings to generate dynamic store copy.',
-      });
-    }
-
-    try {
-      const parsed = await this.generateJson(`Anda adalah pakar Customer Experience Shopee Indonesia.
-Buatkan deskripsi toko menarik dan 3 template balasan chat CS otomatis untuk toko: "${storeName}".
-
-Kembalikan JSON murni:
-{
-  "storeBio": "Deskripsi profil toko menarik dan terpercaya maksimal 3 kalimat",
-  "autoReplies": [
-    { "trigger": "Salam / Tanya Stok", "response": "Template balasan ramah" },
-    { "trigger": "Jadwal Kirim", "response": "Template balasan pengiriman" },
-    { "trigger": "Garansi / Retur", "response": "Template balasan retur" }
-  ],
-  "bannerSlogans": ["Slogan 1", "Slogan 2", "Slogan 3"]
-}`);
-
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        ...parsed,
-      };
-    } catch (err) {
-      console.warn(`[AI Service] Gemini store copy error: ${err.message}`);
-      return this.notConfigured({
-        storeBio: `Selamat datang di ${storeName}! Toko terpercaya dengan koleksi terbaik.`,
-        autoReplies: [],
-        bannerSlogans: [],
-        message: 'Gemini request failed. Fallback data shown.',
-      });
-    }
-  }
-
   // 3. FITUR 1: AI Automated Copywriter & A/B Testing Variations Generator
   async generateABTestCopy({ name = '', category = '', price = 0, description = '', targetAudience = 'Wanita Muda & Dewasa' }) {
     if (!this.ai) {
-      return this.notConfigured({
-        productName: name,
-        variations: [
-          {
-            variantType: 'SEO_OPTIMIZED',
-            variantLabel: 'Varian A: Fokus Algoritma SEO Shopee',
-            title: `[TERBARU 2026] ${name} Premium - Baju Fashion ${category || 'Wanita'} Modis Nyaman`,
-            tagline: 'Meningkatkan visibilitas pencarian organik hingga 2.5x',
-            bullets: [
-              'Bahan berkualitas tinggi, lembut & tidak menerawang',
-              'Jahitan rapi standar butik dengan fitting nyaman',
-              'Ready stock & siap kirim ke seluruh Indonesia',
-            ],
-            shortCopy: `Upgrade penampilanmu dengan ${name}! Dibuat dari material pilihan yang adem dan elegan, cocok untuk hangout maupun acara formal.`,
-            recommendedTags: ['#fashionwanita', '#ootd', '#shopeehaul', '#kualitaspremium'],
-          },
-          {
-            variantType: 'PROMO_DRIVEN',
-            variantLabel: 'Varian B: Fokus Promo & Urgensi Diskon',
-            title: `[FLASH SALE HARI INI] ${name} Diskon Spesial + Gratis Ongkir XTRA!`,
-            tagline: 'Memikat pembeli pemburu diskon dengan trigger kelangkaan',
-            bullets: [
-              'Harga promo terbatas khusus pembelian hari ini',
-              'Bisa COD (Bayar di Tempat) & Garansi Retur 100%',
-              'Stok promo terbatas, amankan warnamu sekarang!',
-            ],
-            shortCopy: `Jangan sampai kehabisan! Dapatkan ${name} dengan harga termurah hari ini. Checkout sekarang sebelum promo berakhir!`,
-            recommendedTags: ['#flashsale', '#diskonspesial', '#gratisongkir', '#cod'],
-          },
-          {
-            variantType: 'EMOTIONAL_BENEFIT',
-            variantLabel: 'Varian C: Fokus Estetika & Kepercayaan Diri',
-            title: `Tampil Anggun & Percaya Diri dengan ${name} - Elegan & Lembut di Kulit`,
-            tagline: 'Membangun koneksi emosional & estetika feminine',
-            bullets: [
-              'Desain flattering yang membuat siluet tubuh tampak lebih jenjang',
-              'Sensasi bahan sejuk yang nyaman dipakai seharian',
-              'Warna aesthetic yang mudah dipadupadankan',
-            ],
-            shortCopy: `Rasakan kenyamanan maksimal tanpa mengorbankan gaya. ${name} hadir untuk menemani setiap momen spesialmu agar makin percaya diri.`,
-            recommendedTags: ['#aestheticoutfit', '#eleganstyle', '#fashioninspo', '#selflove'],
-          },
-        ],
-        confidenceScore: 88,
-      });
+      return this.notConfigured({ productName: name, variations: [] });
     }
 
     try {
@@ -233,19 +133,13 @@ Kembalikan JSON murni dengan 3 variasi (SEO_OPTIMIZED, PROMO_DRIVEN, EMOTIONAL_B
   "confidenceScore": 96
 }`);
 
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        ...parsed,
-      };
+      return this.aiResult(parsed, { productName: name });
     } catch (err) {
       console.warn(`[AI Service] Gemini A/B copy error: ${err.message}`);
-      return this.notConfigured({
-        productName: name,
-        variations: [],
-        message: 'Gagal membuat variasi A/B copy. Cek kunci API Gemini.',
-      });
+      return this.aiFailed(
+        { productName: name, variations: [] },
+        'Gagal membuat variasi A/B copy.'
+      );
     }
   }
 
@@ -265,40 +159,20 @@ Kembalikan JSON murni dengan 3 variasi (SEO_OPTIMIZED, PROMO_DRIVEN, EMOTIONAL_B
     const predictedRunoutDate = new Date(Date.now() + (daysOfInventory * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
     const suggestedBatchReorder = Math.max(20, Math.ceil(dailyVelocity * 30 * 1.2));
 
+    const metrics = {
+      currentStock: totalPhysicalStock,
+      dailyVelocity: Number(dailyVelocity.toFixed(2)),
+      daysOfInventory,
+      leadTimeDays,
+      predictedRunoutDate,
+      urgency,
+      suggestedBatchReorder,
+    };
+
     if (!this.ai) {
-      return this.notConfigured({
-        sku,
-        productName: name,
-        metrics: {
-          currentStock: totalPhysicalStock,
-          dailyVelocity: Number(dailyVelocity.toFixed(2)),
-          daysOfInventory,
-          leadTimeDays,
-          predictedRunoutDate,
-          urgency,
-          suggestedBatchReorder,
-        },
-        restockRecommendation: urgency === 'CRITICAL' || urgency === 'OUT_OF_STOCK'
-          ? `Segera terbitkan Purchase Order ${suggestedBatchReorder} unit sebelum kehabisan stok.`
-          : 'Stok dalam batas aman untuk 30 hari ke depan.',
-        liquidationPlaybook: urgency === 'DEADSTOCK' ? {
-          isDeadstock: true,
-          clearanceDiscountSuggested: '25% - 35%',
-          bundlingIdea: `Bundling 2x ${name} dengan potongan harga spesial atau gift voucher`,
-          flashSaleStrategy: 'Ikuti Flash Sale Shopee pada jam peak (12.00 / 19.00 WIB)',
-          actionSteps: [
-            'Buat Voucher Toko khusus untuk SKU ini',
-            'Alokasikan ke flash sale berkala untuk mencairkan modal kerja',
-            'Kurangi alokasi restock pada batch berikutnya',
-          ],
-        } : {
-          isDeadstock: false,
-          clearanceDiscountSuggested: '0%',
-          bundlingIdea: 'Dapat dijadikan kombo hemat dengan produk terlaris',
-          flashSaleStrategy: 'Gunakan flash sale sesekali untuk mendorong traffic',
-          actionSteps: ['Pantau pergerakan stok harian'],
-        },
-      });
+      // metrics is arithmetic this service computed itself, so it is safe to return.
+      // restockRecommendation and liquidationPlaybook were invented prose and are gone.
+      return this.notConfigured({ sku, productName: name, metrics });
     }
 
     try {
@@ -324,50 +198,34 @@ Kembalikan JSON murni:
   "marketDemandForecast": "Proyeksi tren permintaan 30 hari ke depan"
 }`);
 
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        sku,
-        productName: name,
-        metrics: {
-          currentStock: totalPhysicalStock,
-          dailyVelocity: Number(dailyVelocity.toFixed(2)),
-          daysOfInventory,
-          leadTimeDays,
-          predictedRunoutDate,
-          urgency,
-          suggestedBatchReorder,
-        },
-        ...parsed,
-      };
+      // metrics passed as trusted: model output must not overwrite our arithmetic.
+      return this.aiResult(parsed, { sku, productName: name, metrics });
     } catch (err) {
       console.warn(`[AI Service] Gemini predictive restock error: ${err.message}`);
-      return this.notConfigured({
-        sku,
-        productName: name,
-        metrics: {
-          currentStock: totalPhysicalStock,
-          dailyVelocity: Number(dailyVelocity.toFixed(2)),
-          daysOfInventory,
-          leadTimeDays,
-          predictedRunoutDate,
-          urgency,
-          suggestedBatchReorder,
-        },
-        restockRecommendation: 'Pantau persediaan secara berkala.',
-        liquidationPlaybook: null,
-      });
+      return this.aiFailed(
+        { sku, productName: name, metrics, liquidationPlaybook: null },
+        'Gagal menganalisis prediksi restock.'
+      );
     }
   }
 
   // 5. FITUR 3: AI Dynamic Pricing & Profit-Margin Simulator
-  async simulateDynamicPricing({ name = '', currentPrice = 0, targetPrice = 0, unitCost = 0, unitAdCost = 0, shippingCost = 0, platformFeePercent = 6.5, competitorPrice = 0 }) {
+  async simulateDynamicPricing({ name = '', currentPrice = 0, targetPrice = 0, unitCost = 0, unitAdCost = 0, shippingCost = 0, platformFeePercent = null, competitorPrice = 0 }) {
+    // The platform fee drives every figure below. Assuming a value (it used to default to
+    // 6.5%) produced a margin, breakeven and safety floor that looked measured but were
+    // built on a guess. Refuse to compute instead.
+    if (platformFeePercent === null || platformFeePercent === undefined || platformFeePercent === '' || !Number.isFinite(Number(platformFeePercent))) {
+      return this.missingInput(
+        { productName: name },
+        'Persentase biaya platform wajib diisi sebelum simulasi dapat dihitung.'
+      );
+    }
+
     const price = Number(targetPrice || currentPrice || 0);
     const cogs = Number(unitCost || 0);
     const adCost = Number(unitAdCost || 0);
     const shipping = Number(shippingCost || 0);
-    const feePct = Number(platformFeePercent || 6.5);
+    const feePct = Number(platformFeePercent);
 
     const platformFeeAmount = price * (feePct / 100);
     const totalCost = cogs + adCost + shipping + platformFeeAmount;
@@ -385,30 +243,22 @@ Kembalikan JSON murni:
     else if (grossMarginPercent < 15) riskLevel = 'LOW_MARGIN';
     else if (competitorPrice && price > competitorPrice * 1.35) riskLevel = 'OVERPRICED';
 
+    const input = { currentPrice, targetPrice: price, unitCost: cogs, unitAdCost: adCost, shippingCost: shipping, platformFeePercent: feePct, competitorPrice };
+    const calculations = {
+      platformFeeAmount: Math.round(platformFeeAmount),
+      totalCost: Math.round(totalCost),
+      grossMarginAmount: Math.round(grossMarginAmount),
+      grossMarginPercent: Number(grossMarginPercent.toFixed(1)),
+      breakevenPrice,
+      safetyFloorPrice,
+      riskLevel,
+    };
+
     if (!this.ai) {
-      return this.notConfigured({
-        productName: name,
-        input: { currentPrice, targetPrice: price, unitCost: cogs, unitAdCost: adCost, shippingCost: shipping, platformFeePercent: feePct, competitorPrice },
-        calculations: {
-          platformFeeAmount: Math.round(platformFeeAmount),
-          totalCost: Math.round(totalCost),
-          grossMarginAmount: Math.round(grossMarginAmount),
-          grossMarginPercent: Number(grossMarginPercent.toFixed(1)),
-          breakevenPrice,
-          safetyFloorPrice,
-          riskLevel,
-        },
-        aiAdvice: {
-          optimalPrice: Math.max(safetyFloorPrice, competitorPrice ? Math.round(competitorPrice * 0.98) : Math.round(price)),
-          elasticityAnalysis: grossMarginAmount > 0 
-            ? `Margin saat ini ${grossMarginPercent.toFixed(1)}% (Rp ${Math.round(grossMarginAmount).toLocaleString('id-ID')}/unit). Cukup aman untuk promo voucher.`
-            : 'PERINGATAN: Harga ini merugikan operasional setelah potongan fee dan biaya iklan.',
-          competitorBenchmarking: competitorPrice
-            ? `Harga Anda ${price < competitorPrice ? 'lebih murah' : 'lebih mahal'} dibanding kompetitor (Rp ${Number(competitorPrice).toLocaleString('id-ID')}).`
-            : 'Belum ada data harga pembanding kompetitor.',
-          promotionalDiscountBudget: Math.max(0, Math.round(grossMarginAmount * 0.4)),
-        },
-      });
+      // calculations is real arithmetic and is returned. aiAdvice is not: optimalPrice
+      // used an invented 0.98 undercut and promotionalDiscountBudget an invented 0.4
+      // payout, both rendered under an "AI Pricing Strategist" heading.
+      return this.notConfigured({ productName: name, input, calculations });
     }
 
     try {
@@ -434,82 +284,51 @@ Kembalikan JSON murni:
   }
 }`);
 
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        productName: name,
-        input: { currentPrice, targetPrice: price, unitCost: cogs, unitAdCost: adCost, shippingCost: shipping, platformFeePercent: feePct, competitorPrice },
-        calculations: {
-          platformFeeAmount: Math.round(platformFeeAmount),
-          totalCost: Math.round(totalCost),
-          grossMarginAmount: Math.round(grossMarginAmount),
-          grossMarginPercent: Number(grossMarginPercent.toFixed(1)),
-          breakevenPrice,
-          safetyFloorPrice,
-          riskLevel,
-        },
-        ...parsed,
-      };
+      return this.aiResult(parsed, { productName: name, input, calculations });
     } catch (err) {
       console.warn(`[AI Service] Gemini pricing simulator error: ${err.message}`);
-      return this.notConfigured({
-        productName: name,
-        input: { currentPrice, targetPrice: price, unitCost: cogs, unitAdCost: adCost, shippingCost: shipping, platformFeePercent: feePct, competitorPrice },
-        calculations: {
-          platformFeeAmount: Math.round(platformFeeAmount),
-          totalCost: Math.round(totalCost),
-          grossMarginAmount: Math.round(grossMarginAmount),
-          grossMarginPercent: Number(grossMarginPercent.toFixed(1)),
-          breakevenPrice,
-          safetyFloorPrice,
-          riskLevel,
-        },
-        aiAdvice: {
-          optimalPrice: safetyFloorPrice,
-          elasticityAnalysis: 'Simulasi selesai dihitung.',
-          competitorBenchmarking: '',
-          promotionalDiscountBudget: 0,
-        },
-      });
+      return this.aiFailed(
+        { productName: name, input, calculations },
+        'Gagal mengambil rekomendasi harga dari Gemini. Perhitungan margin tetap ditampilkan.'
+      );
     }
   }
 
   // 6. FITUR 4: AI Automated Daily Store Briefing (Executive Digest)
   async generateDailyBriefing({ storeOverview = {}, adsMetrics = {}, warehouseTotals = {}, topProducts = [] } = {}) {
-    const todayStr = new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const gmv = storeOverview?.kpis?.totalGmv || 0;
-    const orders = storeOverview?.kpis?.totalOrders || 0;
-    const adSpend = adsMetrics?.totalSpend || 0;
-    const roas = adsMetrics?.roas || 0;
-    const discrepancies = warehouseTotals?.discrepanciesCount || 0;
+    const todayStr = new Date().toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    // These KPIs are null when the underlying source has not synced. Coercing them to 0
+    // made the briefing state "GMV tercatat Rp 0" as though it had been measured.
+    const num = (value) => (value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value));
+    const gmv = num(storeOverview?.kpis?.totalGmv);
+    const orders = num(storeOverview?.kpis?.totalOrders);
+    const adSpend = num(adsMetrics?.totalSpend);
+    const roas = num(adsMetrics?.roas);
+    const discrepancies = num(warehouseTotals?.discrepanciesCount);
+    const orUnknown = (value, format) => (value === null ? 'belum tersedia' : format(value));
+
+    const criticalAlerts = [
+      ...(roas !== null && roas > 0 && roas < 2 ? [`ROAS iklan ${roas.toFixed(2)}x.`] : []),
+      ...(discrepancies !== null && discrepancies > 0 ? [`${discrepancies} SKU dengan selisih stok antara Shopee dan Gudang.`] : []),
+    ];
 
     if (!this.ai) {
-      return this.notConfigured({
-        date: todayStr,
-        healthScore: roas >= 4 && discrepancies === 0 ? 92 : roas < 2 ? 65 : 80,
-        executiveSummary: `Briefing Harian Toko (${todayStr}): Performa toko berjalan stabil dengan total GMV tercatat Rp ${Number(gmv).toLocaleString('id-ID')} dan ROAS iklan ${Number(roas).toFixed(2)}x. Terdeteksi ${discrepancies} selisih stok gudang yang memerlukan verifikasi.`,
-        topWinner: topProducts[0]?.name ? `${topProducts[0].name} (${topProducts[0].salesCount} terjual)` : 'Produk Katalog Teratas',
-        criticalAlerts: [
-          ...(roas > 0 && roas < 2 ? [`Iklan Boncos: ROAS saat ini ${Number(roas).toFixed(2)}x di bawah target aman (3.0x).`] : []),
-          ...(discrepancies > 0 ? [`Rekonsiliasi Stok: Terdapat ${discrepancies} SKU dengan selisih stok antara Shopee & Gudang.`] : []),
-        ],
-        priorityActionsToday: [
-          'Tinjau kata kunci kampanye iklan dengan pengeluaran tertinggi untuk memotong kata kunci non-konversi.',
-          'Lakukan penyesuaian stok manual untuk SKU yang berselisih di menu Gudang.',
-          'Optimalkan judul & deskripsi produk unggulan dengan AI A/B Test Copywriter.',
-        ],
-        marketOutlook: 'Kategori fashion wanita tetap aktif di jam makan siang (11.00-13.00) dan malam hari (19.00-21.00 WIB).',
-      });
+      // criticalAlerts are derived from real roas/discrepancies, so they survive.
+      // healthScore (an if-else ladder), marketOutlook (invented peak hours),
+      // priorityActionsToday (a fixed list) and the "Performa toko berjalan stabil"
+      // assertion were all invented and are gone.
+      return this.notConfigured({ date: todayStr, criticalAlerts });
     }
 
     try {
       const parsed = await this.generateJson(`Anda adalah AI Chief Operating Officer (COO) untuk Seller Shopee Indonesia.
-Analisis snapshot toko hari ini (${todayStr}):
-- Total GMV Terakhir: Rp ${Number(gmv).toLocaleString('id-ID')}
-- Total Pesanan: ${orders} pesanan
-- Pengeluaran Iklan: Rp ${Number(adSpend).toLocaleString('id-ID')} (ROAS: ${Number(roas).toFixed(2)}x)
-- Selisih Stok Multi-Gudang: ${discrepancies} SKU bermasalah
+Analisis snapshot toko hari ini (${todayStr}).
+Nilai bertanda "belum tersedia" berarti sumber datanya belum tersinkron — JANGAN mengarang angka untuk itu, dan jangan menyimpulkan performa dari data yang tidak ada.
+- Total GMV Terakhir: ${orUnknown(gmv, (v) => `Rp ${v.toLocaleString('id-ID')}`)}
+- Total Pesanan: ${orUnknown(orders, (v) => `${v} pesanan`)}
+- Pengeluaran Iklan: ${orUnknown(adSpend, (v) => `Rp ${v.toLocaleString('id-ID')}`)} (ROAS: ${orUnknown(roas, (v) => `${v.toFixed(2)}x`)})
+- Selisih Stok Multi-Gudang: ${orUnknown(discrepancies, (v) => `${v} SKU bermasalah`)}
 - Top Produk: ${topProducts.slice(0, 3).map((p) => `${p.name} (${p.salesCount} terjual)`).join(', ') || 'Katalog terhubung'}
 
 Kembalikan JSON murni:
@@ -530,50 +349,28 @@ Kembalikan JSON murni:
   "marketOutlook": "Proyeksi perilaku pembeli dan jam ramai hari ini"
 }`);
 
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        ...parsed,
-      };
+      return this.aiResult(parsed, { date: todayStr });
     } catch (err) {
       console.warn(`[AI Service] Gemini daily briefing error: ${err.message}`);
-      return this.notConfigured({
-        date: todayStr,
-        healthScore: 75,
-        executiveSummary: 'Briefing harian dihasilkan dari data snapshot lokal.',
-        criticalAlerts: [],
-        priorityActionsToday: ['Jalankan sinkronisasi data', 'Tinjau performa iklan harian'],
-      });
+      return this.aiFailed(
+        { date: todayStr, criticalAlerts },
+        'Gagal menyusun briefing harian.'
+      );
     }
   }
 
   // 7. FITUR 5: AI Ads Negative Keyword & Bid Optimization
-  async optimizeAdsKeywordsAndBids({ campaignName = 'Shopee Ads', spend = 0, sales = 0, roas = 0, ctr = 0, category = 'Fashion' }) {
+  async optimizeAdsKeywordsAndBids({ campaignName = 'Shopee Ads', spend = 0, sales = 0, roas = 0, ctr = 0, category = '' }) {
     const isUnderperforming = roas > 0 && roas < 2.5;
+    // Restates the caller's own metrics; adds no claim of its own.
+    const summary = `Pengeluaran Rp ${Number(spend).toLocaleString('id-ID')}, ROAS ${Number(roas).toFixed(2)}x, CTR ${Number(ctr).toFixed(2)}%.`;
 
     if (!this.ai) {
-      return this.notConfigured({
-        campaignName,
-        summary: `Evaluasi Kampanye: Pengeluaran Rp ${Number(spend).toLocaleString('id-ID')}, ROAS ${Number(roas).toFixed(2)}x, CTR ${Number(ctr).toFixed(2)}%.`,
-        wastedSpendEstimate: isUnderperforming ? Math.round(Number(spend) * 0.35) : 0,
-        negativeKeywordsToExclude: [
-          'gratis', 'bekas', 'murahan', 'palsu', 'second', 'tutorial', 'pola jahit',
-        ],
-        bidAdjustments: [
-          { keywordType: 'Kata Kunci Konversi Tinggi (ROAS > 4.0)', action: 'NAIKKAN_BID', recommendedAdjustment: '+15% s/d +20%', reason: 'Tingkatkan pangsa tayang untuk mendominasi peringkat 1-3' },
-          { keywordType: 'Kata Kunci Impresi Tinggi Tanpa Klik (CTR < 1%)', action: 'TURUNKAN_BID', recommendedAdjustment: '-25% s/d -30%', reason: 'Kurangi pemborosan impresi tidak relevan' },
-          { keywordType: 'Kata Kunci Klik Banyak Tanpa Pesanan (CR = 0%)', action: 'JADIKAN_NEGATIVE', recommendedAdjustment: 'Hapus / Nonaktifkan', reason: 'Menyedot anggaran tanpa menghasilkan GMV' },
-        ],
-        scaleKeywordsRecommended: [
-          { keyword: `${category.toLowerCase()} wanita modis`, matchType: 'Pencocokan Luas', suggestedBid: 850, estimatedSearchVolume: 'Tinggi' },
-          { keyword: `${category.toLowerCase()} premium import`, matchType: 'Pencocokan Spesifik', suggestedBid: 1200, estimatedSearchVolume: 'Sedang' },
-          { keyword: `baju ${category.toLowerCase()} kekinian`, matchType: 'Pencocokan Luas', suggestedBid: 700, estimatedSearchVolume: 'Tinggi' },
-        ],
-        dailyBudgetStrategy: isUnderperforming
-          ? 'Turunkan budget harian sementara 20% sampai kata kunci boncos dibersihkan.'
-          : 'Budget harian optimal, siap dinaikkan bertahap 15% pada akhir pekan.',
-      });
+      // This service holds no keyword or search-volume data of any kind. The bids
+      // (850/1200/700), search volumes, negative keywords and wastedSpendEstimate
+      // (spend * 0.35) were invented, and the UI told users to paste them straight
+      // into a live Shopee ad account.
+      return this.notConfigured({ campaignName, summary, isUnderperforming });
     }
 
     try {
@@ -602,28 +399,16 @@ Kembalikan JSON murni:
   "dailyBudgetStrategy": "Rekomendasi taktis anggaran harian"
 }`);
 
-      return {
-        success: true,
-        provider: 'REAL_GEMINI_API',
-        model: this.modelName,
-        ...parsed,
-      };
+      return this.aiResult(parsed, { campaignName, summary });
     } catch (err) {
       console.warn(`[AI Service] Gemini ads optimization error: ${err.message}`);
-      return this.notConfigured({
-        campaignName,
-        summary: 'Gagal menganalisis kampanye dengan Gemini.',
-        negativeKeywordsToExclude: ['gratis', 'bekas', 'murahan'],
-        bidAdjustments: [],
-        scaleKeywordsRecommended: [],
-      });
+      return this.aiFailed(
+        { campaignName, summary, negativeKeywordsToExclude: [], bidAdjustments: [], scaleKeywordsRecommended: [] },
+        'Gagal menganalisis kampanye iklan.'
+      );
     }
   }
 
-  // Backward compatibility methods
-  async generateAdsKeywords(campaignName = 'Shopee Ads Campaign') {
-    return this.optimizeAdsKeywordsAndBids({ campaignName });
-  }
 }
 
 module.exports = new AIService();

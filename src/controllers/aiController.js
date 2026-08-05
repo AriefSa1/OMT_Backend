@@ -2,30 +2,6 @@ const aiService = require('../services/aiService');
 const snapshotService = require('../services/snapshotService');
 const { wrapHandlers } = require('../utils/asyncHandler');
 
-async function generateTitle(req, res) {
-  const { productName, category, geminiApiKey } = req.body;
-  if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-  const result = await aiService.generateProductSEO(productName || 'Aesthetic Silk Blouse', category);
-  return res.json(result);
-}
-
-async function generateStoreCopy(req, res) {
-  const { storeName, geminiApiKey } = req.body;
-  if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-  const result = await aiService.generateStoreCopywriting(storeName);
-  return res.json(result);
-}
-
-async function generateAds(req, res) {
-  const { campaignName, geminiApiKey } = req.body;
-  if (geminiApiKey) aiService.setApiKey(geminiApiKey);
-
-  const result = await aiService.generateAdsKeywords(campaignName);
-  return res.json(result);
-}
-
 // 1. A/B Testing Copywriter
 async function generateABCopy(req, res) {
   try {
@@ -104,8 +80,13 @@ async function getDailyBriefing(req, res) {
       topProducts: overview.topProducts || [],
     });
 
+    // Must mirror the service's own verdict. Hardcoding true here made the card's
+    // `if (res.success && res.briefing)` guard pass for a NOT_CONFIGURED briefing, so
+    // canned content rendered exactly like live model output.
     return res.json({
-      success: true,
+      success: result.success,
+      provider: result.provider,
+      message: result.message,
       briefing: result,
       meta: {
         storeName: overview.storeName,
@@ -138,9 +119,6 @@ async function optimizeAdsKeywords(req, res) {
 }
 
 module.exports = wrapHandlers({
-  generateTitle,
-  generateStoreCopy,
-  generateAds,
   generateABCopy,
   predictRestock,
   simulatePricing,
