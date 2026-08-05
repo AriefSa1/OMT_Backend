@@ -40,10 +40,14 @@ block does.
 
 ```bash
 npx prisma migrate diff --from-url "$DATABASE_URL" \
-  --to-schema-datamodel prisma/schema.prisma --script > /tmp/drift.sql
-# review /tmp/drift.sql, then:
-sqlite3 "${DATABASE_URL#file:}" < /tmp/drift.sql
+  --to-schema-datamodel prisma/schema.prisma --script > drift.sql
+# review drift.sql, then apply it:
+npx prisma db execute --file drift.sql --schema prisma/schema.prisma
 ```
+
+`prisma db execute` is used rather than the `sqlite3` CLI because it ships with the
+project's own dependencies and works the same on Windows, where `sqlite3` is usually
+not installed.
 
 > **Then mark *every* migration as applied, not just `0_init`.**
 >
