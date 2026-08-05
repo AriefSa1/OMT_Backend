@@ -167,41 +167,67 @@ to `src/utils/taskOrdering.js` so status sorts by priority rather than alphabeti
 `fulfillmentSpeed`, `storeRating`, `cancellationRate`) had no source and were dropped from
 the contract instead of being filled with constants. That is the correct resolution.
 
+**Marketplace intelligence wired** — `getMarketplaceInsights` no longer returns
+`activeAdCampaigns: []` / `productSignals: []`. Campaigns come from the persisted ads
+snapshot and signals from `shopeeInsightsService.buildProductSignals()`, fed by the
+product metric snapshot through `snapshotService.normalizeRate` so the CTR threshold means
+the same thing on both paths. `adsMonitor` reports the snapshot's own status instead of a
+fixed sentence, and `productSignalsMeta` carries the reason when nothing was measured.
+
+**Growth stubs state their absence** — `demandForecast` and `bundleSuggestions` are
+`{ status: 'TIDAK_TERSEDIA', items: [], message }`. Bundling needs order item lines;
+`ShopeeOrderSummary` stores daily totals only, so it is stated rather than approximated.
+
+**Category share carries its coverage** — `getDashboardOverview` now emits
+`categorySalesMeta`, because the share is computed over the top-selling page of the
+catalog, not the whole catalog, and the UI has to be able to say so.
+
+Verify all of the above with `node test_phase5_verification.js` (read-only, no sync).
+
 ## Remaining, in order
 
-1. **`src/controllers/optimizationController.js:35,37`** — `activeAdCampaigns: []` and
-   `productSignals: []` are hardcoded even though
-   `shopeeInsightsService.buildProductSignals()` is implemented. Wire it up.
+Nothing is unblocked right now. The two items that were here are done — see above.
 
-2. **`src/services/growthIntelligenceService.js:30,41`** — `demandForecast` and
-   `bundleSuggestions` are `[]` stubs. Surface them as "not available" with a reason; do
-   not fill them with invented numbers.
+Recorded, not started (constraint 10): `growthIntelligenceService.getOverview()` scores
+the catalog with `Math.max(0, 100 - recommendations * 8)`, which floors at 0 once there
+are 13 findings. A floored 0 is computed, not fabricated, but it stops discriminating.
 
 ## Blocked — do not force
 
-3. **Order summary / GMV** — waiting on an endpoint from the user. Until it exists the
+1. **Order summary / GMV** — waiting on an endpoint from the user. Until it exists the
    honest `history.message` stays. Do not substitute an estimate.
 
-4. **`src/services/warehouseService.js:728`** — `StockMovement` only ever receives
+2. **`src/services/warehouseService.js:728`** — `StockMovement` only ever receives
    `type: 'OUT'` (see also `:745`, `:1311`, `:1382`), so **"Total Masuk" is structurally
    always 0** yet still rendered. Hide it until a source exists, or integrate a
    goods-receipt endpoint if the user provides one.
 
-## SKU mapping — needs one real catalog sync
+## SKU mapping — measured, 2026-08-05
 
-5. Requires a real sync (see constraint 8 — ask permission first). Then:
+The catalog sync was run with the user's explicit permission (167 listings, 665 variations,
+50 product-metric snapshots) and `node src/scripts/checkSkuMappingFeasibility.js` answered
+the open question. **It is the "Empty" branch, and more strongly than expected:**
 
-   ```bash
-   node src/scripts/checkSkuMappingFeasibility.js
-   ```
+```
+Varian Shopee tersimpan   : 665      SKU gudang unik : 26,237
+Varian yang punya SKU     : 0 dari 665
+SKU induk cocok           : 0 dari 167
+```
 
-   The output decides the shape of the mapping UI and must not be guessed:
+Not a format mismatch — there is no SKU to match. Every one of the 167 listings has an
+empty `parent_sku` (all 167 rows fall back to the Shopee item id), and all 665 variations
+have an empty `model.sku`. Two independent fields both empty means the listings carry no
+SKU in Seller Center, not that the mapper reads the wrong key.
 
-   - **Variation SKUs match warehouse SKUs** → mapping is mostly automatic, the UI is just
-     a review screen.
-   - **Empty** → 167 listings assembled by hand (~500–670 component rows), so the UI has
-     to be an efficient set-builder.
+Consequences, for whoever builds this next:
 
-   Background: a Shopee listing is a **SET**; a warehouse item is a **COMPONENT**.
-   Name-based matching was measured and produced **zero** matches out of 26,212 items — do
-   not rebuild name matching.
+- The automatic tier is dead. Do not write one, and do not rebuild name matching either —
+  that was already measured at **zero** matches out of 26,212 items.
+- The mapping UI has to be an efficient **set-builder**: 665 sellable units, each needing
+  its warehouse components chosen by hand. Optimise for bulk selection and reuse of
+  component groups across variations of the same listing.
+- A Shopee listing is a **SET**; a warehouse item is a **COMPONENT**. The schema for this
+  (`ProductMapping`, `ProductMappingComponent`) exists and is still read by nothing.
+
+Re-run the script after any future sync — if the seller starts filling SKUs in Seller
+Center, the automatic tier becomes worth revisiting.

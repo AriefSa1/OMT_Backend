@@ -27,7 +27,13 @@ class GrowthIntelligenceService {
         score: productRecommendations.length ? Math.max(0, 100 - productRecommendations.length * 8) : null,
         products: productRecommendations,
       },
-      demandForecast: [],
+      // An empty list reads as "nothing to forecast". Nothing computes a forecast in this
+      // codebase, so the absence is stated instead of implied (AGENTS.md, constraint 2).
+      demandForecast: {
+        status: 'TIDAK_TERSEDIA',
+        items: [],
+        message: 'Prakiraan permintaan belum dihitung. Sistem belum menjalankan model prakiraan apa pun, dan angka tidak diestimasi agar tidak menyesatkan.',
+      },
       restockPlan: warehouseRecommendations,
       priceStrategies: productRecommendations.filter((item) => item.type === 'CONVERSION_REVIEW'),
       voucherAnalysis: {
@@ -38,7 +44,13 @@ class GrowthIntelligenceService {
       },
       adOpportunities: adsRecommendations,
       listingExperiments: productRecommendations.filter((item) => item.type === 'LISTING_CTR'),
-      bundleSuggestions: [],
+      // Bundling needs the item lines of each order; ShopeeOrderSummary keeps daily totals
+      // only, so the pairing cannot be computed from what is stored.
+      bundleSuggestions: {
+        status: 'TIDAK_TERSEDIA',
+        items: [],
+        message: 'Rekomendasi bundling belum tersedia. Ringkasan pesanan hanya menyimpan total harian tanpa rincian item, sehingga kombinasi produk dalam satu pesanan tidak dapat dihitung.',
+      },
       weeklyReport: {
         daysWithData: weeklyRows.length,
         gmv: weeklyRows.length ? weeklyGmv : null,

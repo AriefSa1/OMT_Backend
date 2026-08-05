@@ -25,16 +25,48 @@ async function applyOpt(req, res) {
 }
 
 async function getMarketplaceInsights(req, res) {
-  const catalog = await snapshotService.getCatalogSnapshot({ page: 1, limit: 100 });
+  const [catalog, ads] = await Promise.all([
+    snapshotService.getCatalogSnapshot({ page: 1, limit: 100 }),
+    snapshotService.getAdsSnapshot(),
+  ]);
+
+  // buildProductSignals reads Seller Center field names; the snapshot stores the same
+  // measurements in camelCase, so map onto it instead of restating the rules here.
+  // Products without a metric row have nothing measured — they are not signals.
+  const measured = catalog.products.filter((product) => product.metric);
+  const productSignals = shopeeInsightsService.buildProductSignals(measured.map((product) => ({
+    id: product.shopeeItemId,
+    name: product.name,
+    product_card_impressions: product.metric.impressions,
+    ctr: snapshotService.normalizeRate(product.metric.ctr),
+    add_to_cart_buyers: product.metric.addToCartBuyers,
+    confirmed_orders: product.metric.confirmedOrders,
+    bounce_rate: snapshotService.normalizeRate(product.metric.bounceRate),
+  })));
+
   return res.json({
     success: true,
     data: {
       source: catalog.meta.source,
       meta: catalog.meta,
       productPerformance: catalog.products.map((product) => ({ ...product.metric, itemId: product.shopeeItemId, name: product.name })),
-      activeAdCampaigns: [],
-      adsMonitor: { status: 'SNAPSHOT', message: 'Kampanye aktif tersedia pada halaman Iklan setelah Sync.' },
-      productSignals: [],
+      activeAdCampaigns: ads.topCampaigns,
+      adsMonitor: {
+        status: ads.meta.status,
+        source: ads.meta.source,
+        dataAsOf: ads.meta.dataAsOf,
+        campaignCount: ads.topCampaigns.length,
+        message: ads.topCampaigns.length ? null : ads.meta.message,
+      },
+      productSignals,
+      productSignalsMeta: {
+        status: measured.length ? catalog.meta.status : snapshotService.STATUS.UNAVAILABLE,
+        evaluatedProducts: measured.length,
+        catalogProducts: catalog.products.length,
+        message: measured.length
+          ? null
+          : 'Belum ada snapshot metrik produk. Jalankan Sync performa produk agar sinyal listing dapat dihitung.',
+      },
     },
   });
 }

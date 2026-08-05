@@ -928,6 +928,16 @@ class SnapshotService {
     const warehouseMeasured = warehouse.meta.status === STATUS.FRESH || warehouse.meta.status === STATUS.PENDING;
     const categoryDenominator = Object.values(categoryTotals).reduce((sum, value) => sum + number(value), 0);
     const categorySales = categoryDenominator ? Object.entries(categoryTotals).map(([name, value]) => ({ name, value: Math.round((number(value) / categoryDenominator) * 100) })) : [];
+    // The share is computed over the top-selling page of the catalog, not the whole
+    // catalog. The UI has to say so, so the coverage travels with the numbers.
+    const categorySalesMeta = {
+      basis: 'TOP_PRODUCTS_BY_SALES',
+      productCount: catalog.products.length,
+      categoryCount: categorySales.length,
+      message: categoryDenominator
+        ? `Pangsa dihitung dari ${catalog.products.length} produk dengan penjualan tertinggi pada snapshot katalog.`
+        : 'Belum ada penjualan tercatat pada snapshot katalog, sehingga pangsa kategori tidak dapat dihitung.',
+    };
     return {
       storeName: context.session?.storeName || 'Toko belum terhubung',
       lastSyncedAt: maxDate([context.latestShopeeLog?.timestamp, context.latestAdsLog?.timestamp, context.latestWarehouseLog?.timestamp]),
@@ -951,6 +961,7 @@ class SnapshotService {
       },
       salesTrend,
       categorySales,
+      categorySalesMeta,
       adsMetrics: ads,
       topProducts: catalog.products,
       reconciliationSummary: warehouse.totals,
