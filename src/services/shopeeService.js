@@ -11,6 +11,9 @@ const SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/myd
 // each metric arrives as one { timestamp, value } point per day, so a single call carries
 // the whole history rather than only today.
 const SHOPEE_KEY_METRICS_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v3/dashboard/key-metrics/';
+// endpoint_shopee.json -> datacenter_order_performance. A separate series from the one
+// above: cancellations and refunds, also one point per day.
+const SHOPEE_ORDER_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/dashboard/order-performance/';
 const ADS_AMOUNT_DIVISOR = 100000;
 const SHOPEE_ORDER_BY = {
   'confirmed_sales.desc': 'confirmed_sales.desc',
@@ -439,6 +442,70 @@ class ShopeeService {
       .sort((left, right) => left.date.localeCompare(right.date));
   }
 
+  /**
+   * Cancellations and refunds per day. Shopee reports them as absolute counts and values;
+   * it does not publish the denominator it uses for a cancellation *rate*, so none is
+   * derived here — the figures stay as measured.
+   */
+  async fetchOrderPerformanceHistory({ days = 30, cookie: customCookie = '' } = {}) {
+    const session = await this.getActiveSession();
+    const cookie = customCookie || activeCookie || session?.cookieString || '';
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) return { source: 'EMPTY', rows: [], message: 'Sesi Shopee tidak tersedia.' };
+
+    const safeDays = Math.min(30, Math.max(1, Number(days) || 30));
+    const endTime = Math.floor(Date.now() / 1000);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(endTime - safeDays * 86400),
+      end_time: String(endTime),
+      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      order_type: 'confirmed',
+    });
+
+    try {
+      const response = await axios.get(`${SHOPEE_ORDER_PERFORMANCE_ENDPOINT}?${params}`, {
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data || {};
+      if (payload.code !== 0 || !payload.result) {
+        return { source: 'EMPTY', rows: [], message: `Seller Center menolak permintaan performa pesanan${payload.msg ? `: ${payload.msg}` : '.'}` };
+      }
+
+      const byDate = new Map();
+      const collect = (key, field) => {
+        const points = Array.isArray(payload.result?.[key]?.points) ? payload.result[key].points : [];
+        for (const point of points) {
+          const timestamp = Number(point?.timestamp);
+          if (!Number.isFinite(timestamp)) continue;
+          const date = getJakartaDateKey(new Date(timestamp * 1000));
+          const row = byDate.get(date) || { date };
+          row[field] = asFiniteNumber(point.value);
+          byDate.set(date, row);
+        }
+      };
+      collect('cancelled_orders', 'cancelledOrders');
+      collect('cancelled_sales', 'cancelledSales');
+      collect('return_refund_orders', 'returnRefundOrders');
+      collect('return_refund_sales', 'returnRefundSales');
+
+      return {
+        source: 'SHOPEE_API',
+        rows: [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+        message: null,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        rows: [],
+        message: status ? `Performa pesanan Seller Center mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
+  }
+
   async persistOrderSummaryHistory(storeId, rows = []) {
     if (!storeId || !rows.length) return 0;
     let written = 0;
@@ -449,6 +516,11 @@ class ShopeeService {
         conversionRate: row.conversionRate,
         averageOrderValue: row.averageOrderValue,
       };
+      // Only write cancellation figures for days the series actually covered. Undefined
+      // leaves the stored value alone rather than overwriting it with a zero.
+      for (const field of ['cancelledOrders', 'cancelledSales', 'returnRefundOrders', 'returnRefundSales']) {
+        if (row[field] !== undefined) data[field] = row[field];
+      }
       await prisma.shopeeOrderSummary.upsert({
         where: { storeId_date: { storeId, date: row.date } },
         update: data,
@@ -464,9 +536,24 @@ class ShopeeService {
     if (!session?.storeId) {
       return { source: 'EMPTY', persisted: 0, message: 'Tidak ada sesi toko aktif untuk menyimpan ringkasan pesanan.' };
     }
-    const result = await this.fetchOrderSummaryHistory({ days });
-    const persisted = await this.persistOrderSummaryHistory(session.storeId, result.rows);
-    return { source: result.source, persisted, message: result.message };
+    const [summary, performance] = await Promise.all([
+      this.fetchOrderSummaryHistory({ days }),
+      // Secondary to the GMV series: a failure here must leave the summary intact, so the
+      // days simply keep their existing (possibly null) cancellation figures.
+      this.fetchOrderPerformanceHistory({ days }).catch((err) => ({ source: 'EMPTY', rows: [], message: err.message })),
+    ]);
+
+    const performanceByDate = new Map(performance.rows.map((row) => [row.date, row]));
+    const merged = summary.rows.map((row) => ({ ...row, ...(performanceByDate.get(row.date) || {}) }));
+    const persisted = await this.persistOrderSummaryHistory(session.storeId, merged);
+
+    return {
+      source: summary.source,
+      persisted,
+      cancellationDays: performance.rows.length,
+      message: summary.message,
+      cancellationMessage: performance.message,
+    };
   }
 
   async fetchLiveShopeeMetrics(customCookie = '') {

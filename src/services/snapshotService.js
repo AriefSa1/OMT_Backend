@@ -910,6 +910,23 @@ class SnapshotService {
       prisma.shopeeOrderSummary.findMany({ orderBy: { date: 'desc' }, take: 30 }),
     ]);
     const latestOrder = orders[0] || null;
+    // Computed before salesTrend, which reverses `orders` in place.
+    const cancellationRows = orders.filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
+    const sumField = (rows, field) => rows.reduce((total, row) => total + number(row[field]), 0);
+    const orderQuality = {
+      days: cancellationRows.length,
+      from: cancellationRows.length ? cancellationRows[cancellationRows.length - 1].date : null,
+      to: cancellationRows.length ? cancellationRows[0].date : null,
+      // Absolute figures only. Shopee does not publish the denominator behind its
+      // cancellation rate, so no rate is derived here.
+      cancelledOrders: cancellationRows.length ? sumField(cancellationRows, 'cancelledOrders') : null,
+      cancelledSales: cancellationRows.length ? sumField(cancellationRows, 'cancelledSales') : null,
+      returnRefundOrders: cancellationRows.length ? sumField(cancellationRows, 'returnRefundOrders') : null,
+      returnRefundSales: cancellationRows.length ? sumField(cancellationRows, 'returnRefundSales') : null,
+      message: cancellationRows.length
+        ? null
+        : 'Data pembatalan dan retur belum tersimpan. Jalankan Sync untuk mengambilnya dari Seller Center.',
+    };
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
     const salesTrend = orders.reverse().map((row) => {
       const adRow = adByDate.get(row.date);
@@ -963,6 +980,7 @@ class SnapshotService {
         message: latestOrder ? null : 'Belum ada ringkasan pesanan harian tersimpan. Jalankan Sync untuk mengambil ringkasan dari Seller Center.',
       },
       salesTrend,
+      orderQuality,
       categorySales,
       categorySalesMeta,
       adsMetrics: ads,

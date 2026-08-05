@@ -101,6 +101,13 @@ model ShopeeOrderSummary {
   orderCount        Int
   conversionRate    Float
   averageOrderValue Float
+  // Cancellations and refunds come from a different Seller Center series than the GMV
+  // above, so they are nullable: a day fetched before this existed has no figure, and
+  // that is not the same as a day with none.
+  cancelledOrders     Int?
+  cancelledSales      Float?
+  returnRefundOrders  Int?
+  returnRefundSales   Float?
   createdAt         DateTime @default(now())
 
   @@unique([storeId, date])
