@@ -14,6 +14,14 @@ const SHOPEE_KEY_METRICS_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v3/d
 // endpoint_shopee.json -> datacenter_order_performance. A separate series from the one
 // above: cancellations and refunds, also one point per day.
 const SHOPEE_ORDER_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/dashboard/order-performance/';
+// Satu-satunya endpoint yang benar-benar mengembalikan kategori produk. Daftar katalog
+// (`search_product_list`) TIDAK mengirim field kategori sama sekali — sudah diperiksa
+// seluruh kuncinya: id, name, status, cover_image, parent_sku, price_detail, stock_detail,
+// promotion, statistics, tag, modify_time, create_time, model_list, ... tanpa satu pun
+// bertema kategori. Itu sebabnya seluruh katalog tersimpan sebagai "Uncategorized".
+// Endpoint ini per-produk (satu request per item), jadi hanya dipanggil untuk produk yang
+// kategorinya memang belum diketahui.
+const SHOPEE_PRODUCT_INFO_ENDPOINT = 'https://seller.shopee.co.id/api/v3/product/get_product_info';
 const ADS_AMOUNT_DIVISOR = 100000;
 const SHOPEE_ORDER_BY = {
   'confirmed_sales.desc': 'confirmed_sales.desc',
@@ -360,6 +368,106 @@ class ShopeeService {
 
       await prisma.$transaction(operations);
     }
+  }
+
+  /**
+   * Kategori satu produk. Respons meletakkannya di `data.product_info`:
+   *   category_path:           [100009, 100034, 100167]      (id L1, L2, L3)
+   *   category_path_name_list: ['Aksesoris Fashion', ...]     (nama, indeks sejajar)
+   *
+   * Mengembalikan `null` bila Shopee tidak memberi jalur kategori — pemanggil harus
+   * membiarkan nilai lama, bukan menulis 'Uncategorized' menimpa kategori yang sudah benar.
+   */
+  async fetchProductCategory(itemId, { cookie: customCookie = '', session: knownSession = null } = {}) {
+    const session = knownSession || await this.getActiveSession();
+    const cookie = customCookie || activeCookie || session?.cookieString || '';
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken || !itemId) return null;
+
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      product_id: String(itemId),
+      is_draft: 'false',
+    });
+
+    try {
+      const response = await axios.get(`${SHOPEE_PRODUCT_INFO_ENDPOINT}?${params}`, {
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const info = response.data?.data?.product_info;
+      if (response.data?.code !== 0 || !info) return null;
+
+      const ids = Array.isArray(info.category_path) ? info.category_path.map(String) : [];
+      const names = Array.isArray(info.category_path_name_list) ? info.category_path_name_list.map(String) : [];
+      if (!ids.length && !names.length) return null;
+
+      // Jalur kategori Shopee: [L1, L2, L3]. Kolom l2/l3 di ShopeeProduct memakai konvensi
+      // yang sama dengan yang dipakai endpoint kompetitor (l2catid/l3catid).
+      return {
+        category: names[0] || 'Uncategorized',
+        l2CategoryId: ids[1] || null,
+        l3CategoryId: ids[2] || null,
+        l2CategoryName: names[1] || null,
+        l3CategoryName: names[2] || null,
+        categoryPath: ids,
+        categoryPathNames: names,
+      };
+    } catch (err) {
+      console.warn(`[Shopee Service] Kategori produk ${itemId} tidak dapat diambil:`, err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Melengkapi kategori produk yang masih kosong. Satu request per produk, jadi dibatasi:
+   * hanya produk tanpa kategori yang diproses, dengan konkurensi kecil supaya tidak
+   * membanjiri Seller Center. Sekali terisi, produk itu tidak diambil lagi pada sync
+   * berikutnya.
+   */
+  async enrichMissingCategories({ limit = 200, concurrency = 4 } = {}) {
+    const session = await this.getActiveSession();
+    if (!session?.storeId) return { updated: 0, attempted: 0, message: 'Tidak ada sesi toko aktif.' };
+
+    const pending = await prisma.shopeeProduct.findMany({
+      where: {
+        storeId: session.storeId,
+        OR: [{ category: 'Uncategorized' }, { category: '' }, { l2CategoryId: null }],
+      },
+      select: { shopeeItemId: true },
+      take: Math.max(1, Number(limit) || 200),
+    });
+    if (!pending.length) return { updated: 0, attempted: 0, message: null };
+
+    let updated = 0;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const item = pending[cursor];
+        cursor += 1;
+        const category = await this.fetchProductCategory(item.shopeeItemId, { session });
+        if (!category) continue;
+        await prisma.shopeeProduct.update({
+          where: { shopeeItemId: item.shopeeItemId },
+          data: {
+            category: category.category,
+            l2CategoryId: category.l2CategoryId,
+            l3CategoryId: category.l3CategoryId,
+            l2CategoryName: category.l2CategoryName,
+            l3CategoryName: category.l3CategoryName,
+          },
+        }).catch((err) => console.warn(`[Shopee Service] Gagal menyimpan kategori ${item.shopeeItemId}:`, err.message));
+        updated += 1;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
+
+    return {
+      updated,
+      attempted: pending.length,
+      message: updated ? null : 'Seller Center tidak mengembalikan kategori untuk produk yang diperiksa.',
+    };
   }
 
   async persistOrderSummary(storeId, summary) {

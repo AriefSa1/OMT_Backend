@@ -137,7 +137,22 @@ class AIService {
     let lastClassified = null;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const response = await this.ai.models.generateContent({ model: this.modelName, contents: prompt });
+        const response = await this.ai.models.generateContent({
+          model: this.modelName,
+          contents: prompt,
+          config: {
+            // Meminta JSON lewat kalimat prompt saja tidak cukup — briefing harian pernah
+            // gagal dengan JSON terpotong di tengah array. responseMimeType membuat API
+            // yang menjamin bentuknya, bukan kepatuhan model terhadap instruksi teks.
+            responseMimeType: 'application/json',
+            // gemini-2.5-flash mengaktifkan "thinking" secara default dan token berpikir itu
+            // dipotong dari anggaran keluaran yang sama. Untuk keluaran terstruktur seperti
+            // ini, itu memakan ruang yang seharusnya dipakai jawaban dan membuat respons
+            // panjang terpotong. Anggaran dinaikkan sekaligus berpikirnya dimatikan.
+            maxOutputTokens: 8192,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        });
         const text = response.text || '';
         const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(cleaned);
@@ -416,32 +431,49 @@ Kembalikan JSON murni:
       // survive a Gemini failure too — not just the notConfigured path.
       fallbackPayload: { criticalAlerts },
       failMessage: 'Gagal menyusun briefing harian.',
-      prompt: `Anda adalah AI Chief Operating Officer (COO) untuk Seller Shopee Indonesia.
-Analisis snapshot toko hari ini (${todayStr}).
-Nilai bertanda "belum tersedia" berarti sumber datanya belum tersinkron — JANGAN mengarang angka untuk itu, dan jangan menyimpulkan performa dari data yang tidak ada.
-- Total GMV Terakhir: ${orUnknown(gmv, (v) => `Rp ${v.toLocaleString('id-ID')}`)}
-- Total Pesanan: ${orUnknown(orders, (v) => `${v} pesanan`)}
-- Pengeluaran Iklan: ${orUnknown(adSpend, (v) => `Rp ${v.toLocaleString('id-ID')}`)} (ROAS: ${orUnknown(roas, (v) => `${v.toFixed(2)}x`)})
-- Selisih Stok Multi-Gudang: ${orUnknown(discrepancies, (v) => `${v} SKU bermasalah`)}
-- Top Produk: ${topProducts.slice(0, 3).map((p) => `${p.name} (${p.salesCount} terjual)`).join(', ') || 'Katalog terhubung'}
+      prompt: `Anda adalah konsultan operasional e-commerce Shopee Indonesia yang dibayar untuk MEMBERI SOLUSI, bukan membacakan angka.
 
-Kembalikan JSON murni:
+DATA SNAPSHOT TOKO (${todayStr}):
+- GMV terakhir: ${orUnknown(gmv, (v) => `Rp ${v.toLocaleString('id-ID')}`)}
+- Pesanan: ${orUnknown(orders, (v) => `${v} pesanan`)}
+- Biaya iklan: ${orUnknown(adSpend, (v) => `Rp ${v.toLocaleString('id-ID')}`)} | ROAS: ${orUnknown(roas, (v) => `${v.toFixed(2)}x`)}
+- Selisih stok multi-gudang: ${orUnknown(discrepancies, (v) => `${v} SKU`)}
+- Produk teratas: ${topProducts.slice(0, 5).map((p) => `${p.name} (${p.salesCount} terjual)`).join(' | ') || 'belum tersedia'}
+
+ATURAN KERAS:
+1. Nilai "belum tersedia" berarti datanya BELUM TERSINKRON. Jangan mengarang angkanya, dan
+   jangan menyimpulkan performa dari data yang tidak ada. Kalau sebuah analisis butuh data
+   yang tidak ada, katakan data apa yang perlu disinkronkan lebih dulu.
+2. DILARANG hanya mengulang angka di atas. Setiap poin yang Anda tulis harus menjawab
+   "jadi apa yang harus dilakukan?" — angka hanya boleh muncul sebagai ALASAN dari sebuah
+   tindakan, bukan sebagai isi utama.
+3. Setiap rekomendasi harus: spesifik (menyebut produk/kampanye/SKU bila ada), dapat
+   dikerjakan hari ini oleh satu orang, dan menyebutkan dampak yang diharapkan.
+4. Jangan memberi saran generik seperti "tingkatkan kualitas foto" atau "optimalkan
+   listing" tanpa menyebut produk mana dan perubahan konkret apa.
+
+Kembalikan JSON murni (tanpa markdown):
 {
   "date": "${todayStr}",
-  "healthScore": 85,
-  "executiveSummary": "Ringkasan eksekutif 2-3 kalimat padat mengenai kesehatan toko hari ini",
-  "topWinner": "Nama produk dan sorotan performa terbaik",
-  "criticalAlerts": [
-    "Alert 1 (misal anomali iklan atau stok)",
-    "Alert 2"
+  "headline": "Satu kalimat: hal terpenting yang harus diputuskan pemilik toko hari ini",
+  "situation": "2-3 kalimat membaca kondisi toko — hubungkan antar metrik (mis. biaya iklan vs pesanan), bukan mendaftar ulang angkanya",
+  "priorityActions": [
+    {
+      "title": "Judul tindakan singkat dan spesifik",
+      "why": "Alasan berbasis data di atas — sebutkan angkanya di sini",
+      "how": "Langkah konkret yang dikerjakan hari ini, cukup detail untuk langsung dieksekusi",
+      "expectedImpact": "Dampak yang realistis diharapkan, mis. 'menekan biaya iklan sia-sia ~Rp X/hari'",
+      "urgency": "TINGGI"
+    }
   ],
-  "priorityActionsToday": [
-    "Aksi Prioritas 1 yang harus dikerjakan tim hari ini",
-    "Aksi Prioritas 2",
-    "Aksi Prioritas 3"
+  "risks": [
+    { "risk": "Risiko yang mengintai bila dibiarkan", "mitigation": "Cara mencegahnya" }
   ],
-  "marketOutlook": "Proyeksi perilaku pembeli dan jam ramai hari ini"
-}`,
+  "dataGaps": ["Data yang perlu disinkronkan agar analisis berikutnya lebih tajam"]
+}
+
+priorityActions: 2-4 item, urut dari paling mendesak, urgency salah satu dari TINGGI/SEDANG/RENDAH.
+risks: 1-3 item. dataGaps: hanya isi bila memang ada data "belum tersedia" di atas, selain itu [].`,
     });
   }
 

@@ -156,9 +156,13 @@ class SyncService {
     return records.length;
   }
 
-  async persistAdsSnapshot(metrics) {
+  /**
+   * `dateOverride` dipakai saat mengisi mundur riwayat (backfillAdsHistory): tanpa itu
+   * setiap hari lampau akan tertulis ke tanggal hari ini dan saling menimpa.
+   */
+  async persistAdsSnapshot(metrics, { date: dateOverride = null } = {}) {
     if (!metrics?.success || !metrics.storeId) return null;
-    const date = asDateKey();
+    const date = dateOverride || asDateKey();
     const dataAsOf = new Date();
     const total = {
       storeId: metrics.storeId,
@@ -236,6 +240,70 @@ class SyncService {
     return { date, campaignCount: metrics.topCampaigns.length, dataAsOf };
   }
 
+  /**
+   * Mengisi mundur riwayat harian iklan.
+   *
+   * Alasannya: `ShopeeOrderSummary` punya 30+ hari (satu panggilan key-metrics membawa
+   * seluruh deret), sedangkan `ShopeeAdsData` hanya bertambah satu baris per hari saat
+   * sync berjalan — jadi grafik tren menggambar GMV 30 hari berdampingan dengan biaya
+   * iklan yang hanya beberapa hari terakhir.
+   *
+   * Endpoint iklan Shopee hanya menerima satu rentang waktu per panggilan dan
+   * mengembalikan totalnya, bukan deret harian. Jadi satu-satunya cara mendapat riwayat
+   * harian adalah memanggilnya sekali per hari — sudah diverifikasi Shopee melayani
+   * tanggal lampau. Karena itu fungsi ini mahal (satu request per hari) dan tidak
+   * dijalankan otomatis oleh cron; panggil manual saat memang perlu mengisi lubang.
+   *
+   * Hari yang sudah punya baris dilewati kecuali `overwrite: true`.
+   */
+  async backfillAdsHistory({ days = 30, overwrite = false } = {}) {
+    const session = await shopeeService.getActiveSession();
+    if (!session?.storeId) {
+      return { success: false, filled: 0, skipped: 0, failed: 0, message: 'Tidak ada sesi Shopee aktif.' };
+    }
+
+    const safeDays = Math.min(90, Math.max(1, Number(days) || 30));
+    const existing = new Set(
+      overwrite ? [] : (await prisma.shopeeAdsData.findMany({
+        where: { storeId: session.storeId },
+        select: { date: true },
+      })).map((row) => row.date)
+    );
+
+    const results = { filled: 0, skipped: 0, failed: 0, dates: [] };
+    for (let offset = safeDays - 1; offset >= 0; offset -= 1) {
+      const target = new Date(Date.now() - offset * 86400000);
+      const dateKey = asDateKey(target);
+      if (existing.has(dateKey)) {
+        results.skipped += 1;
+        continue;
+      }
+
+      // Batas hari mengikuti Asia/Jakarta, sama seperti seluruh kunci tanggal di aplikasi.
+      const [year, month, day] = dateKey.split('-').map(Number);
+      const startTime = Math.floor(Date.UTC(year, month - 1, day, -7, 0, 0) / 1000);
+      const endTime = startTime + 86399;
+
+      try {
+        const metrics = await shopeeService.fetchShopeeAdsMetrics({ period: 'custom', startTime, endTime });
+        if (!metrics?.success) {
+          results.failed += 1;
+          continue;
+        }
+        await this.persistAdsSnapshot(metrics, { date: dateKey });
+        results.filled += 1;
+        results.dates.push(dateKey);
+      } catch (err) {
+        console.warn(`[Sync] Backfill iklan ${dateKey} gagal:`, err.message);
+        results.failed += 1;
+      }
+    }
+
+    const message = `Riwayat iklan: ${results.filled} hari terisi, ${results.skipped} dilewati (sudah ada), ${results.failed} gagal.`;
+    await this.writeLog('ADS_BACKFILL', results.failed && !results.filled ? 'FAILED' : 'SUCCESS', message);
+    return { success: true, ...results, message };
+  }
+
   async persistWarehouseSnapshots(items, source) {
     if (!Array.isArray(items) || !items.length) return 0;
     const date = asDateKey();
@@ -286,14 +354,21 @@ class SyncService {
         console.warn('[Sync] Order summary history unavailable:', err.message);
         return { source: 'EMPTY', persisted: 0, message: err.message };
       });
+      // Juga sekunder: hanya menyentuh produk yang kategorinya masih kosong, jadi setelah
+      // katalog terisi penuh langkah ini praktis tidak berbiaya.
+      const categories = await shopeeService.enrichMissingCategories().catch((err) => {
+        console.warn('[Sync] Category enrichment unavailable:', err.message);
+        return { updated: 0, attempted: 0 };
+      });
       const orderPart = orderSummary.persisted
         ? ` ${orderSummary.persisted} hari ringkasan pesanan tersimpan.`
         : ` Ringkasan pesanan belum tersimpan: ${orderSummary.message || 'sumber tidak tersedia.'}`;
+      const categoryPart = categories.updated ? ` ${categories.updated} kategori produk dilengkapi.` : '';
       const message = (metricCount
         ? `Katalog disinkronkan bersama ${metricCount} snapshot performa produk.`
-        : 'Katalog disinkronkan. Snapshot performa produk belum tersedia dari Seller Center.') + orderPart;
+        : 'Katalog disinkronkan. Snapshot performa produk belum tersedia dari Seller Center.') + orderPart + categoryPart;
       await this.writeLog('SHOPEE_SYNC', intelligence.source === 'SHOPEE_API' ? 'SUCCESS' : 'DEGRADED', message, timestamp);
-      return { success: true, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, orderSummaryDays: orderSummary.persisted, origin };
+      return { success: true, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, orderSummaryDays: orderSummary.persisted, categoriesUpdated: categories.updated, origin };
     } catch (err) {
       await this.writeLog('SHOPEE_SYNC', 'FAILED', err.message, timestamp);
       return { success: false, source: 'Shopee', status: 'Gagal', message: 'Sinkronisasi Shopee gagal.', origin };

@@ -5,6 +5,7 @@ const {
   ACTIVE_WAREHOUSE_ID_LIST,
   isActiveWarehouseId,
 } = require('../constants/warehouseConstants');
+const { isGiftItem } = require('../constants/catalogConstants');
 
 const STATUS = {
   FRESH: 'Segar',
@@ -467,6 +468,9 @@ class SnapshotService {
         sales: number(row.sales),
         roas: number(row.roas),
         ctr: normalizeRate(row.ctr),
+        // Dibutuhkan dashboard untuk kartu impresi/klik dan pembandingnya terhadap kemarin.
+        impressions: number(row.impressions),
+        clicks: number(row.clicks),
         dataAsOf: row.dataAsOf,
       })),
       meta,
@@ -948,10 +952,55 @@ class SnapshotService {
       cancelledSales: cancellationRows.length ? sumField(cancellationRows, 'cancelledSales') : null,
       returnRefundOrders: cancellationRows.length ? sumField(cancellationRows, 'returnRefundOrders') : null,
       returnRefundSales: cancellationRows.length ? sumField(cancellationRows, 'returnRefundSales') : null,
+      // Asal angka, supaya pembaca tidak perlu menebak apa yang sedang dihitung.
+      provenance: {
+        source: 'Shopee Seller Center — Data Center',
+        endpoint: '/api/mydata/dashboard/order-performance/',
+        orderType: 'confirmed',
+        cancelled: 'Pesanan yang dibatalkan (oleh pembeli, penjual, atau sistem Shopee) beserta nilainya, dihitung Shopee per hari.',
+        returnRefund: 'Pesanan yang dikembalikan atau dana dikembalikan (return/refund) beserta nilainya, dihitung Shopee per hari.',
+      },
       message: cancellationRows.length
         ? null
         : 'Data pembatalan dan retur belum tersimpan. Jalankan Sync untuk mengambilnya dari Seller Center.',
     };
+    // Pembanding hari-ke-hari untuk kartu statistik harian.
+    //
+    // `orders` masih terurut menurun (terbaru dulu) pada titik ini; `ads.history` sudah
+    // menaik (terlama dulu). Baris "kemarin" diambil sebagai baris kedua dari masing-masing,
+    // bukan dengan mengurangi tanggal — kalau satu hari tidak tersimpan, pembandingnya
+    // adalah hari tersimpan sebelumnya, dan tanggalnya ikut dilaporkan supaya jelas.
+    const previousOrder = orders[1] || null;
+    const adsToday = ads.history[ads.history.length - 1] || null;
+    const adsYesterday = ads.history[ads.history.length - 2] || null;
+    const compare = (current, previous) => {
+      if (current === null || current === undefined || previous === null || previous === undefined) {
+        return { current: current ?? null, previous: previous ?? null, direction: null, changePercent: null };
+      }
+      const delta = number(current) - number(previous);
+      return {
+        current: number(current),
+        previous: number(previous),
+        direction: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
+        changePercent: number(previous) === 0 ? null : (delta / Math.abs(number(previous))) * 100,
+      };
+    };
+    // Hari berjalan belum selesai. Membandingkannya dengan kemarin yang penuh akan
+    // SELALU terlihat turun — itu artefak jam, bukan penurunan performa. Ditandai supaya
+    // UI dapat mengatakannya, bukan menampilkan panah merah tanpa konteks.
+    const currentDate = latestOrder?.date || adsToday?.date || null;
+    const kpiTrend = {
+      currentDate,
+      currentIsPartial: currentDate === dateKey(),
+      previousDate: previousOrder?.date || adsYesterday?.date || null,
+      gmv: compare(latestOrder ? number(latestOrder.gmv) : null, previousOrder ? number(previousOrder.gmv) : null),
+      orders: compare(latestOrder ? number(latestOrder.orderCount) : null, previousOrder ? number(previousOrder.orderCount) : null),
+      roas: compare(adsToday ? number(adsToday.roas) : null, adsYesterday ? number(adsYesterday.roas) : null),
+      adSpend: compare(adsToday ? number(adsToday.spend) : null, adsYesterday ? number(adsYesterday.spend) : null),
+      impressions: compare(adsToday ? number(adsToday.impressions) : null, adsYesterday ? number(adsYesterday.impressions) : null),
+      clicks: compare(adsToday ? number(adsToday.clicks) : null, adsYesterday ? number(adsYesterday.clicks) : null),
+    };
+
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
     const salesTrend = orders.reverse().map((row) => {
       const adRow = adByDate.get(row.date);
@@ -964,7 +1013,13 @@ class SnapshotService {
         adSpend: adRow ? number(adRow.spend) : null,
       };
     });
-    const categoryTotals = catalog.products.reduce((acc, product) => {
+    // Item hadiah gratis bukan produk jualan: satu di antaranya mencatat ~6.954 "penjualan"
+    // dan mendominasi daftar terlaris maupun pangsa kategori. Dikecualikan dari keduanya,
+    // tapi tidak dihapus dari katalog itu sendiri (/shopee tetap menampilkannya).
+    const sellableProducts = catalog.products.filter((product) => !isGiftItem(product));
+    const excludedGiftCount = catalog.products.length - sellableProducts.length;
+
+    const categoryTotals = sellableProducts.reduce((acc, product) => {
       const category = product.category || 'Tanpa kategori';
       acc[category] = (acc[category] || 0) + number(product.salesCount);
       return acc;
@@ -975,12 +1030,24 @@ class SnapshotService {
     const categorySales = categoryDenominator ? Object.entries(categoryTotals).map(([name, value]) => ({ name, value: Math.round((number(value) / categoryDenominator) * 100) })) : [];
     // The share is computed over the top-selling page of the catalog, not the whole
     // catalog. The UI has to say so, so the coverage travels with the numbers.
+    const uncategorisedShare = categorySales.find((row) => row.name === 'Uncategorized')?.value ?? 0;
     const categorySalesMeta = {
       basis: 'TOP_PRODUCTS_BY_SALES',
-      productCount: catalog.products.length,
+      productCount: sellableProducts.length,
       categoryCount: categorySales.length,
+      excludedGiftCount,
+      // Asal angka, sesuai keluhan bahwa panel ini tidak jelas sumbernya.
+      provenance: {
+        source: 'Snapshot katalog Shopee (tabel ShopeeProduct)',
+        metric: 'salesCount — total penjualan kumulatif per produk menurut Seller Center',
+        scope: `${sellableProducts.length} produk dengan penjualan tertinggi${excludedGiftCount ? `, setelah mengecualikan ${excludedGiftCount} item hadiah gratis` : ''}`,
+        categoryField: 'Kategori diambil dari Seller Center (category_path_name_list) saat Sync katalog',
+      },
+      // Kategori produk hanya terisi setelah Sync menjalankan pelengkapan kategori. Selama
+      // masih "Uncategorized", panel ini benar tapi belum informatif — katakan apa adanya.
+      needsCategorySync: uncategorisedShare >= 50,
       message: categoryDenominator
-        ? `Pangsa dihitung dari ${catalog.products.length} produk dengan penjualan tertinggi pada snapshot katalog.`
+        ? `Pangsa dihitung dari ${sellableProducts.length} produk dengan penjualan tertinggi pada snapshot katalog${excludedGiftCount ? ` (${excludedGiftCount} item hadiah gratis dikecualikan)` : ''}.`
         : 'Belum ada penjualan tercatat pada snapshot katalog, sehingga pangsa kategori tidak dapat dihitung.',
     };
     return {
@@ -994,11 +1061,14 @@ class SnapshotService {
         averageOrderValue: latestOrder ? number(latestOrder.averageOrderValue) : null,
         roas: ads.roas,
         adSpend: ads.totalSpend,
+        impressions: ads.impressions,
+        clicks: ads.clicks,
         // A disconnected or never-synced warehouse has no measurement, so these are
         // null rather than 0 — matching how the order KPIs above already behave.
         warehouseUnits: warehouseMeasured ? warehouse.totals.totalAvailableUnits : null,
         discrepanciesAlerts: warehouseMeasured ? warehouse.totals.discrepanciesCount : null,
       },
+      kpiTrend,
       reconciliationTrust: warehouse.reconciliationTrust,
       history: {
         orderAvailable: Boolean(latestOrder),
@@ -1009,7 +1079,13 @@ class SnapshotService {
       categorySales,
       categorySalesMeta,
       adsMetrics: ads,
-      topProducts: catalog.products,
+      topProducts: sellableProducts,
+      topProductsMeta: {
+        excludedGiftCount,
+        message: excludedGiftCount
+          ? `${excludedGiftCount} item hadiah gratis dikecualikan dari daftar ini karena bukan produk jualan.`
+          : null,
+      },
       reconciliationSummary: warehouse.totals,
     };
   }
