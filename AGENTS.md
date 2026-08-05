@@ -186,21 +186,64 @@ Verify all of the above with `node test_phase5_verification.js` (read-only, no s
 
 ## Remaining, in order
 
-Nothing is unblocked right now. The two items that were here are done — see above.
+Nothing is unblocked right now.
+
+Recorded, not started: the warehouse account cannot read the endpoints listed as refused
+above. If those permissions are granted, `/v1/invertories/transaction` would give a
+store-wide inbound feed — the one thing the per-variant flow cannot provide cheaply.
 
 Recorded, not started (constraint 10): `growthIntelligenceService.getOverview()` scores
 the catalog with `Math.max(0, 100 - recommendations * 8)`, which floors at 0 once there
 are 13 findings. A floored 0 is computed, not fabricated, but it stops discriminating.
 
+## Endpoints — what answers, and what does not
+
+Both blockers below were cleared by probing the endpoints the user documented in
+`endpoint_shopee.json` and `warehouse_endpoint.json` with the credentials already stored.
+Probe before assuming something is missing; probe again before assuming it is present.
+
+**Wired (verified against the live store, 2026-08-05)**
+
+| Source | Endpoint | Feeds |
+|---|---|---|
+| Shopee | `/api/mydata/v3/dashboard/key-metrics/` | `ShopeeOrderSummary` — one point per day, 30-day backfill |
+| Shopee | `/api/mydata/dashboard/order-performance/` | cancellation & refund columns on the same model |
+| Shopee | `/api/mydata/v1/dashboard/traffic-sources/` | live channel breakdown (`GET /api/shopee/traffic-sources`) |
+| Gudang | `/v1/invertories/stock_flow` | per-variant movements, both directions |
+| Gudang | `/v1/invertories/dashboard/overview` | team inventory KPIs (`GET /api/warehouse/team-overview`) |
+
+Three traps in those APIs, each already paid for once:
+
+- `stock_flow` needs **both** `product_id` and `variant_id`; `product_id` alone hangs past
+  the timeout. It pages (one variant here holds 21,290 rows), and **the sign is not a
+  direction** — `transfer_out` arrives positive exactly like `transfer_in`, so direction
+  comes from the type.
+- `key-metrics` omits the running day, which is why its rows are safe to store as final.
+  Use the `confirmed_*` series: the rest of the app reports confirmed orders.
+- The warehouse endpoints refuse without a `team_id`, and the login response does not
+  carry one reliably — resolve it from `/v1/users/info`.
+
+**Refused for this account** (`purna94`, team 63, role owner on domain 63): warehouse
+`/v1/invertories/transaction`, `/v1/teams/performance`, `/v1/warehouses/insight/overview`
+all return `permission kosong`. That is an access-rights matter, not a code one.
+
+**Confirmed absent — do not synthesise**
+
+- Store health: `accounthealth/.../overview` carries only `penalty_point`,
+  `failed_metric_count`, `appeal_count`, `performance_rating`. Chat response rate,
+  fulfilment speed and store rating are not there.
+- A cancellation **rate**: Shopee publishes the absolute figures but not the denominator,
+  so none is derived.
+- Product categories: the catalog list returns no category field at all — 1 of 167
+  products carries an id. The pie chart reads "Uncategorized" because that is the truth.
+- `product-rankings` rejects every `order_by` tried; `v4/product/performance` already
+  covers that ground.
+
 ## Blocked — do not force
 
-1. **Order summary / GMV** — waiting on an endpoint from the user. Until it exists the
-   honest `history.message` stays. Do not substitute an estimate.
-
-2. **`src/services/warehouseService.js:728`** — `StockMovement` only ever receives
-   `type: 'OUT'` (see also `:745`, `:1311`, `:1382`), so **"Total Masuk" is structurally
-   always 0** yet still rendered. Hide it until a source exists, or integrate a
-   goods-receipt endpoint if the user provides one.
+1. **Lifetime stock-in per SKU** — `stock_flow` pages, and a busy variant runs to tens of
+   thousands of rows, so the totals shown are for the fetched window and are labelled as
+   such. Do not present them as lifetime figures without paging the whole history.
 
 ## SKU mapping — measured, 2026-08-05
 
