@@ -1399,23 +1399,19 @@ class WarehouseService {
       };
     });
 
-    if (reconciliationList.length) {
-      await prisma.$transaction(
-        reconciliationList.map((row) =>
-          prisma.stockReconciliation.create({
-            data: {
-              sku: row.sku,
-              warehouseId: row.warehouseId || null,
-              warehouseName: row.warehouseName || null,
-              shopeeStock: row.shopeeStock,
-              warehouseStock: row.warehouseStock,
-              variance: row.variance,
-              status: row.status,
-            },
-          })
-        )
-      );
-    }
+    // Persistence is disabled until the SKU mapping table lands.
+    //
+    // This block appended one row per SKU-warehouse pair on every sync, with no upsert
+    // and no retention: 148,533 rows accumulated from 12 runs in four hours, which at
+    // the 30-minute cron is roughly 1.25 million rows a day.
+    //
+    // Re-running it would also be pointless. Shopee SKUs and warehouse SKUs currently
+    // share zero values (catalog SKUs fall back to the Shopee item id), so every row it
+    // wrote was an artefact of comparing two disjoint sets. The read path still serves
+    // the last-written rows, and getWarehouseSnapshot now marks them unreliable.
+    //
+    // Phase 2 replaces this with an upserted current-state table keyed by the Shopee
+    // sellable unit, plus a compact daily snapshot.
 
     const discrepanciesCount = reconciliationList.filter((row) => row.status !== 'MATCHED').length;
 

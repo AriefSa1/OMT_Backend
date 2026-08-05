@@ -323,13 +323,19 @@ class SnapshotService {
       connectionReady: true,
       freshnessMinutes: 45,
     });
+    // Margin needs ALL four cost inputs. The previous condition only returned null when
+    // every one was missing, so filling in a single field silently treated the other
+    // three as zero and reported a margin far higher than reality.
+    const economicsInputs = [product.unitCost, product.unitAdCost, product.shippingCost, product.platformFeePercent];
+    const economicsComplete = economicsInputs.every((value) => value !== null && value !== undefined);
+
     const unitCost = number(product.unitCost);
     const unitAdCost = number(product.unitAdCost);
     const shippingCost = number(product.shippingCost);
     const feeAmount = number(product.price) * (number(product.platformFeePercent) / 100);
-    const estimatedMargin = product.unitCost === null && product.unitAdCost === null && product.shippingCost === null && product.platformFeePercent === null
-      ? null
-      : number(product.price) - unitCost - unitAdCost - shippingCost - feeAmount;
+    const estimatedMargin = economicsComplete
+      ? number(product.price) - unitCost - unitAdCost - shippingCost - feeAmount
+      : null;
     return {
       product: {
         ...product,
@@ -561,6 +567,27 @@ class SnapshotService {
       return ACTIVE_WAREHOUSE_ID_LIST.map((id) => latestReconByKey.get(`${item.sku}:${id}`)).find(Boolean) || null;
     };
     const reconciliations = items.map(reconciliationForItem).filter(Boolean);
+
+    // Reconciliation compares a warehouse SKU against a Shopee listing found by SKU.
+    // Catalog SKUs currently fall back to the Shopee item id when parent_sku is empty,
+    // so the two sets can be entirely disjoint - in which case every "discrepancy" is an
+    // artefact of the comparison, not a real stock gap. Measure the overlap and let the
+    // UI say so rather than presenting the count as fact.
+    const [warehouseSkuRows, shopeeSkuRows] = await Promise.all([
+      prisma.warehouseItem.findMany({ select: { sku: true }, distinct: ['sku'] }),
+      prisma.shopeeProduct.findMany({ select: { sku: true } }),
+    ]);
+    const shopeeSkuSet = new Set(shopeeSkuRows.map((row) => row.sku).filter(Boolean));
+    const mappedSkuCount = warehouseSkuRows.filter((row) => shopeeSkuSet.has(row.sku)).length;
+    const reconciliationTrust = {
+      reliable: mappedSkuCount > 0,
+      mappedSkuCount,
+      warehouseSkuCount: warehouseSkuRows.length,
+      message: mappedSkuCount > 0
+        ? null
+        : 'Tidak ada SKU gudang yang cocok dengan katalog Shopee, sehingga selisih stok belum dapat dihitung. Pemetaan SKU diperlukan.',
+    };
+
     const dataAsOf = maxDate([
       ...allMatchingRows.map((row) => row.lastUpdated),
       ...reconciliationRows.map((row) => row.checkedAt),
@@ -581,8 +608,12 @@ class SnapshotService {
         totalPhysicalUnits,
         totalAvailableUnits,
         totalValuation,
-        discrepanciesCount: reconciliations.filter((row) => row.status !== 'MATCHED').length,
+        // null, not 0, when the figure cannot be trusted — 0 would read as "no problems".
+        discrepanciesCount: reconciliationTrust.reliable
+          ? reconciliations.filter((row) => row.status !== 'MATCHED').length
+          : null,
       },
+      reconciliationTrust,
       counts: {
         all: countRows.length,
         priority: countByType('priority'),
@@ -688,17 +719,24 @@ class SnapshotService {
     ]);
     const latestOrder = orders[0] || null;
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
-    const salesTrend = orders.reverse().map((row) => ({
-      day: row.date,
-      gmv: number(row.gmv),
-      orders: number(row.orderCount),
-      adSpend: number(adByDate.get(row.date)?.spend),
-    }));
+    const salesTrend = orders.reverse().map((row) => {
+      const adRow = adByDate.get(row.date);
+      return {
+        day: row.date,
+        gmv: number(row.gmv),
+        orders: number(row.orderCount),
+        // null leaves a gap in the chart. number(undefined) returned 0, which drew a day
+        // with no ads snapshot as a day of zero ad spend.
+        adSpend: adRow ? number(adRow.spend) : null,
+      };
+    });
     const categoryTotals = catalog.products.reduce((acc, product) => {
       const category = product.category || 'Tanpa kategori';
       acc[category] = (acc[category] || 0) + number(product.salesCount);
       return acc;
     }, {});
+    // Only STATUS.FRESH and STATUS.PENDING mean the snapshot actually holds measurements.
+    const warehouseMeasured = warehouse.meta.status === STATUS.FRESH || warehouse.meta.status === STATUS.PENDING;
     const categoryDenominator = Object.values(categoryTotals).reduce((sum, value) => sum + number(value), 0);
     const categorySales = categoryDenominator ? Object.entries(categoryTotals).map(([name, value]) => ({ name, value: Math.round((number(value) / categoryDenominator) * 100) })) : [];
     return {
@@ -712,9 +750,12 @@ class SnapshotService {
         averageOrderValue: latestOrder ? number(latestOrder.averageOrderValue) : null,
         roas: ads.roas,
         adSpend: ads.totalSpend,
-        warehouseUnits: warehouse.totals.totalAvailableUnits,
-        discrepanciesAlerts: warehouse.totals.discrepanciesCount,
+        // A disconnected or never-synced warehouse has no measurement, so these are
+        // null rather than 0 — matching how the order KPIs above already behave.
+        warehouseUnits: warehouseMeasured ? warehouse.totals.totalAvailableUnits : null,
+        discrepanciesAlerts: warehouseMeasured ? warehouse.totals.discrepanciesCount : null,
       },
+      reconciliationTrust: warehouse.reconciliationTrust,
       history: {
         orderAvailable: Boolean(latestOrder),
         message: latestOrder ? null : 'Data GMV dan pesanan belum tersedia karena endpoint ringkasan pesanan belum terhubung.',
