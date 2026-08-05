@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { randomUUID } = require('crypto');
 const prisma = require('../utils/prisma');
+const { executeRaw } = require('../utils/sqlHelper');
 const {
   ACTIVE_WAREHOUSES,
   ACTIVE_WAREHOUSE_ID_LIST,
@@ -1104,7 +1105,7 @@ class WarehouseService {
         const placeholders = chunk.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ');
         const values = chunk.flatMap((row) => columns.map((column) => row[column]));
         const sql = `INSERT INTO "WarehouseItem" (${columns.map((column) => `"${column}"`).join(', ')}) VALUES ${placeholders} ON CONFLICT("sku", "warehouseId") DO UPDATE SET ${updateColumns.map((column) => `"${column}" = excluded."${column}"`).join(', ')}`;
-        await tx.$executeRawUnsafe(sql, ...values);
+        await executeRaw(tx, sql, ...values);
       }
       for (let i = 0; i < staleIds.length; i += 500) {
         await tx.warehouseItem.deleteMany({ where: { id: { in: staleIds.slice(i, i + 500) } } });

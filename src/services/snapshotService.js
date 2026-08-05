@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const { queryRaw } = require('../utils/sqlHelper');
 const { sortTasksByPriority } = require('../utils/taskOrdering');
 const {
   ACTIVE_WAREHOUSES,
@@ -618,26 +619,24 @@ class SnapshotService {
     const requestedSort = sortParts[0];
     const sortField = sortAliases[requestedSort] || (['lastUpdated', 'name', 'availableStock', 'totalStock', 'priceMin', 'stockValue', 'teamName', 'warehouseName'].includes(sort) ? sort : 'lastUpdated');
     const sortDirection = sortParts[1] || direction;
-    const ascending = sortDirection === 'asc';
-
-    // Whitelisted, so the sort key can be interpolated into SQL. Text sorts use
-    // NOCASE to keep the case-insensitive ordering the previous JS comparator had.
+    const ascending = sortDirection === 'asc';    // Whitelisted, so the sort key can be interpolated into SQL.
     const sortExpressions = {
       lastUpdated: 'MAX("lastUpdated")',
-      name: 'MIN("name") COLLATE NOCASE',
+      name: 'LOWER(MIN("name"))',
       availableStock: 'SUM("availableStock")',
       totalStock: 'SUM("totalStock")',
       priceMin: 'MIN("priceMin")',
       stockValue: STOCK_VALUE_SQL,
-      teamName: 'MIN("teamName") COLLATE NOCASE',
-      warehouseName: 'MIN("warehouseName") COLLATE NOCASE',
+      teamName: 'LOWER(MIN("teamName"))',
+      warehouseName: 'LOWER(MIN("warehouseName"))',
     };
     const orderExpression = sortExpressions[sortField] || sortExpressions.lastUpdated;
     const orderDirection = ascending ? 'ASC' : 'DESC';
 
     // One row per SKU. Grouping by SKU is also correct for a single-warehouse view,
     // since (sku, warehouseId) is unique - so the same statement serves both.
-    const pageRows = await prisma.$queryRawUnsafe(
+    const pageRows = await queryRaw(
+      prisma,
       `SELECT "sku",
               MIN("id") AS "repId",
               SUM("totalStock") AS "totalStock",
@@ -690,7 +689,8 @@ class SnapshotService {
     });
 
     const [[viewTotals], typeCountRows, warehouseCountRows, teamCountRows] = await Promise.all([
-      prisma.$queryRawUnsafe(
+      queryRaw(
+        prisma,
         `SELECT COUNT(*) AS "skus",
                 COALESCE(SUM("totalStock"), 0) AS "totalPhysicalUnits",
                 COALESCE(SUM("availableStock"), 0) AS "totalAvailableUnits",
@@ -701,20 +701,23 @@ class SnapshotService {
                       SUM("availableStock") AS "availableStock",
                       ${STOCK_VALUE_SQL} AS "stockValue",
                       MAX("lastUpdated") AS "lastUpdated"
-               FROM "WarehouseItem" ${viewWhere} GROUP BY "sku")`,
+               FROM "WarehouseItem" ${viewWhere} GROUP BY "sku") AS "sub"`,
         ...viewParams
       ),
-      prisma.$queryRawUnsafe(
+      queryRaw(
+        prisma,
         `SELECT "productType", COUNT(DISTINCT "sku") AS "count"
          FROM "WarehouseItem" ${baseWhere} GROUP BY "productType"`,
         ...filterParams
       ),
-      prisma.$queryRawUnsafe(
+      queryRaw(
+        prisma,
         `SELECT "warehouseId", COUNT(DISTINCT "sku") AS "count"
          FROM "WarehouseItem" ${baseWhere} GROUP BY "warehouseId"`,
         ...filterParams
       ),
-      prisma.$queryRawUnsafe(
+      queryRaw(
+        prisma,
         `SELECT "teamId", MIN("teamName") AS "teamName", MIN("teamCode") AS "teamCode",
                 COUNT(DISTINCT "sku") AS "count"
          FROM "WarehouseItem" ${baseWhere} AND "teamId" IS NOT NULL GROUP BY "teamId"`,
@@ -748,7 +751,6 @@ class SnapshotService {
       .sort((a, b) => Number(a.id) - Number(b.id));
 
     // Latest reconciliation per (sku, warehouse), restricted to the SKUs on this page.
-    // The whole set is only assembled when a caller explicitly asks for the list.
     const activeWarehousePlaceholders = ACTIVE_WAREHOUSE_ID_LIST.map(() => '?').join(', ');
     const latestReconciliationSql = (skuFilter) => `
       SELECT sr.*
@@ -768,7 +770,8 @@ class SnapshotService {
 
     const pageSkus = pagedItems.map((item) => item.sku);
     const pageReconciliationRows = pageSkus.length
-      ? await prisma.$queryRawUnsafe(
+      ? await queryRaw(
+        prisma,
         latestReconciliationSql(` AND sr."sku" IN (${pageSkus.map(() => '?').join(', ')})`),
         ...ACTIVE_WAREHOUSE_ID_LIST,
         ...ACTIVE_WAREHOUSE_ID_LIST,
@@ -786,23 +789,15 @@ class SnapshotService {
       return ACTIVE_WAREHOUSE_ID_LIST.map((id) => latestReconByKey.get(`${item.sku}:${id}`)).find(Boolean) || null;
     };
 
-    // The inventory page reads item.reconciliation and never this list, but shipping it
-    // anyway made a 24-row response 5.85MB. /warehouse/reconciliation opts back in.
-    //
-    // One row per SKU, not every reconciliation row: the previous code mapped each item
-    // to a single reconciliation, taking the first active warehouse that had one. The
-    // CASE reproduces that precedence, and MIN() makes SQLite return the bare columns
-    // from the row it picked.
     const warehousePrecedenceSql = `CASE sr."warehouseId" ${ACTIVE_WAREHOUSE_ID_LIST
       .map((id, index) => `WHEN ${Number(id)} THEN ${index}`)
       .join(' ')} ELSE ${ACTIVE_WAREHOUSE_ID_LIST.length} END`;
 
-    // Strict true, not truthy: warehouseController passes req.query straight through,
-    // so a client sending ?includeReconciliationList=true must not be able to turn a
-    // 36KB response back into a 7MB one.
     const reconciliations = includeReconciliationList === true
-      ? await prisma.$queryRawUnsafe(
-        `SELECT sr.*, MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
+      ? await queryRaw(
+        prisma,
+        `SELECT sr."sku", MIN(sr."status") AS "status", MAX(sr."checkedAt") AS "checkedAt",
+                MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
          FROM (${latestReconciliationSql('')}) sr
          INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
            ON item."sku" = sr."sku"
@@ -813,17 +808,13 @@ class SnapshotService {
       )
       : [];
 
-    // Reconciliation compares a warehouse SKU against a Shopee listing found by SKU.
-    // Catalog SKUs currently fall back to the Shopee item id when parent_sku is empty,
-    // so the two sets can be entirely disjoint - in which case every "discrepancy" is an
-    // artefact of the comparison, not a real stock gap. Measure the overlap and let the
-    // UI say so rather than presenting the count as fact.
     const [[skuOverlap]] = await Promise.all([
-      prisma.$queryRawUnsafe(`
-        SELECT (SELECT COUNT(DISTINCT "sku") FROM "WarehouseItem") AS "warehouseSkuCount",
-               (SELECT COUNT(*) FROM (SELECT DISTINCT "sku" FROM "WarehouseItem") w
-                 WHERE w."sku" IN (SELECT "sku" FROM "ShopeeProduct")) AS "mappedSkuCount"
-      `),
+      queryRaw(
+        prisma,
+        `SELECT (SELECT COUNT(DISTINCT "sku") FROM "WarehouseItem") AS "warehouseSkuCount",
+                (SELECT COUNT(*) FROM (SELECT DISTINCT "sku" FROM "WarehouseItem") AS w
+                  WHERE w."sku" IN (SELECT "sku" FROM "ShopeeProduct")) AS "mappedSkuCount"`
+      ),
     ]);
     const mappedSkuCount = number(skuOverlap?.mappedSkuCount);
     const reconciliationTrust = {
@@ -835,22 +826,20 @@ class SnapshotService {
         : 'Tidak ada SKU gudang yang cocok dengan katalog Shopee, sehingga selisih stok belum dapat dihitung. Pemetaan SKU diperlukan.',
     };
 
-    // Counted in SQL rather than by measuring an array, so the figure no longer depends
-    // on every reconciliation row being loaded first. Counts the same one-per-SKU set
-    // the list above returns, so the count and the list cannot drift apart.
     const [[reconciliationStats]] = await Promise.all([
-      prisma.$queryRawUnsafe(
+      queryRaw(
+        prisma,
         `SELECT COUNT(*) AS "auditedCount",
                 SUM(CASE WHEN "status" <> 'MATCHED' THEN 1 ELSE 0 END) AS "discrepanciesCount",
                 MAX("checkedAt") AS "latestCheckedAt"
          FROM (
-           SELECT sr."status" AS "status", sr."checkedAt" AS "checkedAt",
+           SELECT sr."sku", MIN(sr."status") AS "status", MAX(sr."checkedAt") AS "checkedAt",
                   MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
            FROM (${latestReconciliationSql('')}) sr
            INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
              ON item."sku" = sr."sku"
            GROUP BY sr."sku"
-         )`,
+         ) AS "sub"`,
         ...ACTIVE_WAREHOUSE_ID_LIST,
         ...ACTIVE_WAREHOUSE_ID_LIST,
         ...viewParams
