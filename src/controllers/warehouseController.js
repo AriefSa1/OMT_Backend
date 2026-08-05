@@ -70,7 +70,7 @@ async function getProductHistory(req, res) {
 
 async function getReconciliation(req, res) {
   try {
-    const snapshot = await snapshotService.getWarehouseSnapshot({ page: 1, limit: 100 });
+    const snapshot = await snapshotService.getWarehouseSnapshot({ page: 1, limit: 100, includeReconciliationList: true });
     const reconciliationList = snapshot.reconciliation;
     const discrepanciesCount = reconciliationList.filter((row) => row.status !== 'MATCHED').length;
     return res.json({

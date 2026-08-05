@@ -36,6 +36,19 @@ function dateKey(date = new Date()) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+/**
+ * Raw queries bypass Prisma's type mapping, so a SQLite DateTime column arrives as the
+ * stored epoch-milliseconds integer (a BigInt), not a Date. Typed queries on the same
+ * column return a Date, so anything read raw has to be converted back or the two paths
+ * disagree about what a timestamp is.
+ */
+function rawDate(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value;
+  const parsed = new Date(typeof value === 'bigint' ? Number(value) : value);
+  return Number.isNaN(parsed.valueOf()) ? null : parsed;
+}
+
 function maxDate(values) {
   const valid = values.filter(Boolean).map((value) => new Date(value)).filter((value) => !Number.isNaN(value.valueOf()));
   if (!valid.length) return null;
@@ -425,7 +438,7 @@ class SnapshotService {
     };
   }
 
-  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc' } = {}) {
+  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false } = {}) {
     const { latestWarehouseLog, warehouseConfigured } = await this.getContext();
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
@@ -446,52 +459,38 @@ class SnapshotService {
       where.teamId = Number(teamId);
     }
 
-    const allMatchingRows = await prisma.warehouseItem.findMany({ where });
-    const viewRows = type && type !== 'all'
-      ? allMatchingRows.filter((row) => row.productType === String(type).toLowerCase())
-      : allMatchingRows;
+    // Grouping, sorting and paging all happen in SQL. Loading the table into memory
+    // first cost ~4.7s and 23.7MB per request against 26k rows, to return 24 of them.
+    const filters = [];
+    const filterParams = [];
+    const specificWarehouse = warehouseId && warehouseId !== 'all';
 
-    const aggregateRows = (rows) => {
-      if (warehouseId && warehouseId !== 'all') {
-        return rows.map((row) => ({
-          ...row,
-          warehouseId: Number(row.warehouseId),
-          warehouseName: ACTIVE_WAREHOUSES.find((warehouse) => warehouse.id === Number(row.warehouseId))?.name || row.warehouseName,
-          stockValue: number(row.priceMin) * number(row.totalStock),
-        }));
-      }
+    if (specificWarehouse) {
+      filters.push('"warehouseId" = ?');
+      filterParams.push(isActiveWarehouseId(warehouseId) ? Number(warehouseId) : -1);
+    } else {
+      filters.push(`"warehouseId" IN (${ACTIVE_WAREHOUSE_ID_LIST.map(() => '?').join(', ')})`);
+      filterParams.push(...ACTIVE_WAREHOUSE_ID_LIST);
+    }
+    if (search) {
+      filters.push('("name" LIKE ? OR "sku" LIKE ? OR "refId" LIKE ?)');
+      const pattern = `%${search}%`;
+      filterParams.push(pattern, pattern, pattern);
+    }
+    if (teamId && teamId !== 'all') {
+      filters.push('"teamId" = ?');
+      filterParams.push(Number(teamId));
+    }
 
-      const grouped = new Map();
-      for (const row of rows) {
-        const existing = grouped.get(row.sku);
-        if (!existing) {
-          grouped.set(row.sku, {
-            ...row,
-            warehouseId: null,
-            warehouseName: 'Multi-gudang',
-            warehouseLocation: null,
-            location: 'Multi-gudang',
-            availableStock: number(row.availableStock),
-            reservedStock: number(row.reservedStock),
-            totalStock: number(row.totalStock),
-            stockValue: number(row.priceMin) * number(row.totalStock),
-            warehouseCount: 1,
-          });
-          continue;
-        }
-        existing.availableStock += number(row.availableStock);
-        existing.reservedStock += number(row.reservedStock);
-        existing.totalStock += number(row.totalStock);
-        existing.stockValue += number(row.priceMin) * number(row.totalStock);
-        existing.warehouseCount += 1;
-        if (new Date(row.lastUpdated) > new Date(existing.lastUpdated)) existing.lastUpdated = row.lastUpdated;
-      }
-      return Array.from(grouped.values());
-    };
+    // The type filter narrows the visible list but deliberately not the counts, which
+    // the tab bar uses to show how many rows each type would yield.
+    const typeFilter = type && type !== 'all' ? ' AND "productType" = ?' : '';
+    const typeParams = type && type !== 'all' ? [String(type).toLowerCase()] : [];
+    const baseWhere = `WHERE ${filters.join(' AND ')}`;
+    const viewWhere = `${baseWhere}${typeFilter}`;
+    const viewParams = [...filterParams, ...typeParams];
 
-    const items = aggregateRows(viewRows);
-    const countRows = aggregateRows(allMatchingRows);
-    const total = items.length;
+    const STOCK_VALUE_SQL = 'SUM(COALESCE("priceMin", 0) * "totalStock")';
     const sortAliases = {
       updated: 'lastUpdated',
       available: 'availableStock',
@@ -508,57 +507,165 @@ class SnapshotService {
     const sortField = sortAliases[requestedSort] || (['lastUpdated', 'name', 'availableStock', 'totalStock', 'priceMin', 'stockValue', 'teamName', 'warehouseName'].includes(sort) ? sort : 'lastUpdated');
     const sortDirection = sortParts[1] || direction;
     const ascending = sortDirection === 'asc';
-    items.sort((left, right) => {
-      const a = left[sortField];
-      const b = right[sortField];
-      const leftValue = a instanceof Date ? a.valueOf() : typeof a === 'string' ? a.toLowerCase() : number(a);
-      const rightValue = b instanceof Date ? b.valueOf() : typeof b === 'string' ? b.toLowerCase() : number(b);
-      if (leftValue === rightValue) return String(left.sku).localeCompare(String(right.sku));
-      return (leftValue > rightValue ? 1 : -1) * (ascending ? 1 : -1);
+
+    // Whitelisted, so the sort key can be interpolated into SQL. Text sorts use
+    // NOCASE to keep the case-insensitive ordering the previous JS comparator had.
+    const sortExpressions = {
+      lastUpdated: 'MAX("lastUpdated")',
+      name: 'MIN("name") COLLATE NOCASE',
+      availableStock: 'SUM("availableStock")',
+      totalStock: 'SUM("totalStock")',
+      priceMin: 'MIN("priceMin")',
+      stockValue: STOCK_VALUE_SQL,
+      teamName: 'MIN("teamName") COLLATE NOCASE',
+      warehouseName: 'MIN("warehouseName") COLLATE NOCASE',
+    };
+    const orderExpression = sortExpressions[sortField] || sortExpressions.lastUpdated;
+    const orderDirection = ascending ? 'ASC' : 'DESC';
+
+    // One row per SKU. Grouping by SKU is also correct for a single-warehouse view,
+    // since (sku, warehouseId) is unique - so the same statement serves both.
+    const pageRows = await prisma.$queryRawUnsafe(
+      `SELECT "sku",
+              MIN("id") AS "repId",
+              SUM("totalStock") AS "totalStock",
+              SUM("availableStock") AS "availableStock",
+              SUM("reservedStock") AS "reservedStock",
+              ${STOCK_VALUE_SQL} AS "stockValue",
+              COUNT(*) AS "warehouseCount",
+              MAX("lastUpdated") AS "lastUpdated"
+       FROM "WarehouseItem"
+       ${viewWhere}
+       GROUP BY "sku"
+       ORDER BY ${orderExpression} ${orderDirection}, "sku" ASC
+       LIMIT ? OFFSET ?`,
+      ...viewParams,
+      safeLimit,
+      (safePage - 1) * safeLimit
+    );
+
+    // Only the page is materialised - at most `safeLimit` rows.
+    const representatives = await prisma.warehouseItem.findMany({
+      where: { id: { in: pageRows.map((row) => row.repId) } },
+    });
+    const representativeById = new Map(representatives.map((row) => [row.id, row]));
+
+    const pagedItems = pageRows.map((row) => {
+      const base = representativeById.get(row.repId) || {};
+      const shared = {
+        ...base,
+        availableStock: number(row.availableStock),
+        reservedStock: number(row.reservedStock),
+        totalStock: number(row.totalStock),
+        stockValue: number(row.stockValue),
+        lastUpdated: rawDate(row.lastUpdated),
+      };
+      if (specificWarehouse) {
+        return {
+          ...shared,
+          warehouseId: Number(base.warehouseId),
+          warehouseName: ACTIVE_WAREHOUSES.find((warehouse) => warehouse.id === Number(base.warehouseId))?.name || base.warehouseName,
+        };
+      }
+      return {
+        ...shared,
+        warehouseId: null,
+        warehouseName: 'Multi-gudang',
+        warehouseLocation: null,
+        location: 'Multi-gudang',
+        warehouseCount: number(row.warehouseCount),
+      };
     });
 
-    const pagedItems = items.slice((safePage - 1) * safeLimit, safePage * safeLimit);
-    const totalPhysicalUnits = items.reduce((sum, item) => sum + number(item.totalStock), 0);
-    const totalAvailableUnits = items.reduce((sum, item) => sum + number(item.availableStock), 0);
-    const totalValuation = items.reduce((sum, item) => sum + number(item.stockValue), 0);
-    const countByType = (productType) => countRows.filter((item) => item.productType === productType).length;
-    const whCountMap = new Map(ACTIVE_WAREHOUSES.map((warehouse) => [warehouse.id, new Set()]));
-    for (const row of allMatchingRows) {
-      const warehouseSet = whCountMap.get(Number(row.warehouseId));
-      if (warehouseSet) warehouseSet.add(row.sku);
-    }
+    const [[viewTotals], typeCountRows, warehouseCountRows, teamCountRows] = await Promise.all([
+      prisma.$queryRawUnsafe(
+        `SELECT COUNT(*) AS "skus",
+                COALESCE(SUM("totalStock"), 0) AS "totalPhysicalUnits",
+                COALESCE(SUM("availableStock"), 0) AS "totalAvailableUnits",
+                COALESCE(SUM("stockValue"), 0) AS "totalValuation",
+                MAX("lastUpdated") AS "lastUpdated"
+         FROM (SELECT "sku",
+                      SUM("totalStock") AS "totalStock",
+                      SUM("availableStock") AS "availableStock",
+                      ${STOCK_VALUE_SQL} AS "stockValue",
+                      MAX("lastUpdated") AS "lastUpdated"
+               FROM "WarehouseItem" ${viewWhere} GROUP BY "sku")`,
+        ...viewParams
+      ),
+      prisma.$queryRawUnsafe(
+        `SELECT "productType", COUNT(DISTINCT "sku") AS "count"
+         FROM "WarehouseItem" ${baseWhere} GROUP BY "productType"`,
+        ...filterParams
+      ),
+      prisma.$queryRawUnsafe(
+        `SELECT "warehouseId", COUNT(DISTINCT "sku") AS "count"
+         FROM "WarehouseItem" ${baseWhere} GROUP BY "warehouseId"`,
+        ...filterParams
+      ),
+      prisma.$queryRawUnsafe(
+        `SELECT "teamId", MIN("teamName") AS "teamName", MIN("teamCode") AS "teamCode",
+                COUNT(DISTINCT "sku") AS "count"
+         FROM "WarehouseItem" ${baseWhere} AND "teamId" IS NOT NULL GROUP BY "teamId"`,
+        ...filterParams
+      ),
+    ]);
+
+    const total = number(viewTotals?.skus);
+    const totalPhysicalUnits = number(viewTotals?.totalPhysicalUnits);
+    const totalAvailableUnits = number(viewTotals?.totalAvailableUnits);
+    const totalValuation = number(viewTotals?.totalValuation);
+
+    const typeCounts = new Map(typeCountRows.map((row) => [row.productType, number(row.count)]));
+    const countByType = (productType) => typeCounts.get(productType) || 0;
+    const countsAll = typeCountRows.reduce((sum, row) => sum + number(row.count), 0);
+
+    const warehouseCounts = new Map(warehouseCountRows.map((row) => [Number(row.warehouseId), number(row.count)]));
     const enrichedWarehouses = ACTIVE_WAREHOUSES.map((warehouse) => ({
       id: warehouse.id,
       name: warehouse.name,
-      count: whCountMap.get(warehouse.id)?.size || 0,
+      count: warehouseCounts.get(warehouse.id) || 0,
     }));
 
-    const teamMap = new Map();
-    for (const item of countRows) {
-      if (!item.teamId) continue;
-      const current = teamMap.get(item.teamId) || { id: item.teamId, name: item.teamName || `Team ${item.teamId}`, code: item.teamCode, count: 0 };
-      current.count += 1;
-      teamMap.set(item.teamId, current);
-    }
-    const teamsList = Array.from(teamMap.values()).sort((a, b) => Number(a.id) - Number(b.id));
+    const teamsList = teamCountRows
+      .map((row) => ({
+        id: row.teamId,
+        name: row.teamName || `Team ${row.teamId}`,
+        code: row.teamCode,
+        count: number(row.count),
+      }))
+      .sort((a, b) => Number(a.id) - Number(b.id));
 
-    const reconciliationRows = await prisma.$queryRaw`
+    // Latest reconciliation per (sku, warehouse), restricted to the SKUs on this page.
+    // The whole set is only assembled when a caller explicitly asks for the list.
+    const activeWarehousePlaceholders = ACTIVE_WAREHOUSE_ID_LIST.map(() => '?').join(', ');
+    const latestReconciliationSql = (skuFilter) => `
       SELECT sr.*
       FROM "StockReconciliation" sr
       INNER JOIN (
         SELECT "sku", "warehouseId", MAX("checkedAt") AS "latestCheckedAt"
         FROM "StockReconciliation"
-        WHERE "warehouseId" IN (38, 94, 67, 96)
+        WHERE "warehouseId" IN (${activeWarehousePlaceholders})
         GROUP BY "sku", "warehouseId"
       ) latest
         ON latest."sku" = sr."sku"
         AND latest."warehouseId" = sr."warehouseId"
         AND latest."latestCheckedAt" = sr."checkedAt"
-      WHERE sr."warehouseId" IN (38, 94, 67, 96)
+      WHERE sr."warehouseId" IN (${activeWarehousePlaceholders})${skuFilter}
       ORDER BY sr."checkedAt" DESC
     `;
+
+    const pageSkus = pagedItems.map((item) => item.sku);
+    const pageReconciliationRows = pageSkus.length
+      ? await prisma.$queryRawUnsafe(
+        latestReconciliationSql(` AND sr."sku" IN (${pageSkus.map(() => '?').join(', ')})`),
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...pageSkus
+      )
+      : [];
+
     const latestReconByKey = new Map();
-    for (const row of reconciliationRows) {
+    for (const row of pageReconciliationRows) {
       const key = `${row.sku}:${row.warehouseId || 'none'}`;
       if (!latestReconByKey.has(key)) latestReconByKey.set(key, row);
     }
@@ -566,32 +673,79 @@ class SnapshotService {
       if (item.warehouseId) return latestReconByKey.get(`${item.sku}:${item.warehouseId}`) || null;
       return ACTIVE_WAREHOUSE_ID_LIST.map((id) => latestReconByKey.get(`${item.sku}:${id}`)).find(Boolean) || null;
     };
-    const reconciliations = items.map(reconciliationForItem).filter(Boolean);
+
+    // The inventory page reads item.reconciliation and never this list, but shipping it
+    // anyway made a 24-row response 5.85MB. /warehouse/reconciliation opts back in.
+    //
+    // One row per SKU, not every reconciliation row: the previous code mapped each item
+    // to a single reconciliation, taking the first active warehouse that had one. The
+    // CASE reproduces that precedence, and MIN() makes SQLite return the bare columns
+    // from the row it picked.
+    const warehousePrecedenceSql = `CASE sr."warehouseId" ${ACTIVE_WAREHOUSE_ID_LIST
+      .map((id, index) => `WHEN ${Number(id)} THEN ${index}`)
+      .join(' ')} ELSE ${ACTIVE_WAREHOUSE_ID_LIST.length} END`;
+
+    // Strict true, not truthy: warehouseController passes req.query straight through,
+    // so a client sending ?includeReconciliationList=true must not be able to turn a
+    // 36KB response back into a 7MB one.
+    const reconciliations = includeReconciliationList === true
+      ? await prisma.$queryRawUnsafe(
+        `SELECT sr.*, MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
+         FROM (${latestReconciliationSql('')}) sr
+         INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
+           ON item."sku" = sr."sku"
+         GROUP BY sr."sku"`,
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...viewParams
+      )
+      : [];
 
     // Reconciliation compares a warehouse SKU against a Shopee listing found by SKU.
     // Catalog SKUs currently fall back to the Shopee item id when parent_sku is empty,
     // so the two sets can be entirely disjoint - in which case every "discrepancy" is an
     // artefact of the comparison, not a real stock gap. Measure the overlap and let the
     // UI say so rather than presenting the count as fact.
-    const [warehouseSkuRows, shopeeSkuRows] = await Promise.all([
-      prisma.warehouseItem.findMany({ select: { sku: true }, distinct: ['sku'] }),
-      prisma.shopeeProduct.findMany({ select: { sku: true } }),
+    const [[skuOverlap]] = await Promise.all([
+      prisma.$queryRawUnsafe(`
+        SELECT (SELECT COUNT(DISTINCT "sku") FROM "WarehouseItem") AS "warehouseSkuCount",
+               (SELECT COUNT(*) FROM (SELECT DISTINCT "sku" FROM "WarehouseItem") w
+                 WHERE w."sku" IN (SELECT "sku" FROM "ShopeeProduct")) AS "mappedSkuCount"
+      `),
     ]);
-    const shopeeSkuSet = new Set(shopeeSkuRows.map((row) => row.sku).filter(Boolean));
-    const mappedSkuCount = warehouseSkuRows.filter((row) => shopeeSkuSet.has(row.sku)).length;
+    const mappedSkuCount = number(skuOverlap?.mappedSkuCount);
     const reconciliationTrust = {
       reliable: mappedSkuCount > 0,
       mappedSkuCount,
-      warehouseSkuCount: warehouseSkuRows.length,
+      warehouseSkuCount: number(skuOverlap?.warehouseSkuCount),
       message: mappedSkuCount > 0
         ? null
         : 'Tidak ada SKU gudang yang cocok dengan katalog Shopee, sehingga selisih stok belum dapat dihitung. Pemetaan SKU diperlukan.',
     };
 
-    const dataAsOf = maxDate([
-      ...allMatchingRows.map((row) => row.lastUpdated),
-      ...reconciliationRows.map((row) => row.checkedAt),
+    // Counted in SQL rather than by measuring an array, so the figure no longer depends
+    // on every reconciliation row being loaded first. Counts the same one-per-SKU set
+    // the list above returns, so the count and the list cannot drift apart.
+    const [[reconciliationStats]] = await Promise.all([
+      prisma.$queryRawUnsafe(
+        `SELECT COUNT(*) AS "auditedCount",
+                SUM(CASE WHEN "status" <> 'MATCHED' THEN 1 ELSE 0 END) AS "discrepanciesCount",
+                MAX("checkedAt") AS "latestCheckedAt"
+         FROM (
+           SELECT sr."status" AS "status", sr."checkedAt" AS "checkedAt",
+                  MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
+           FROM (${latestReconciliationSql('')}) sr
+           INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
+             ON item."sku" = sr."sku"
+           GROUP BY sr."sku"
+         )`,
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...ACTIVE_WAREHOUSE_ID_LIST,
+        ...viewParams
+      ),
     ]);
+
+    const dataAsOf = maxDate([rawDate(viewTotals?.lastUpdated), rawDate(reconciliationStats?.latestCheckedAt)]);
     const meta = freshnessMeta({
       source: SOURCE.WAREHOUSE,
       dataAsOf,
@@ -610,12 +764,12 @@ class SnapshotService {
         totalValuation,
         // null, not 0, when the figure cannot be trusted — 0 would read as "no problems".
         discrepanciesCount: reconciliationTrust.reliable
-          ? reconciliations.filter((row) => row.status !== 'MATCHED').length
+          ? number(reconciliationStats?.discrepanciesCount)
           : null,
       },
       reconciliationTrust,
       counts: {
-        all: countRows.length,
+        all: countsAll,
         priority: countByType('priority'),
         research: countByType('research'),
         general: countByType('general'),
