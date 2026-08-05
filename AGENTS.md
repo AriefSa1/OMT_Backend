@@ -227,6 +227,27 @@ above stop the app from spending it needlessly and make a real exhaustion say so
 (`errorCode: 'RATE_LIMITED'`) instead of a generic "gagal". Full write-up:
 `docs/AI_SERVICE.md`; `npm run docs:ai` for a terminal summary.
 
+## Dead code removed (2026-08-05)
+
+Each item below was verified to have zero references anywhere in the repo (`grep` across
+routes, controllers, services, scripts, tests) before removal — do not re-add any of
+these without the same check.
+
+- `src/utils/prismaClient.js` — a second, independent `PrismaClient` built from the
+  default `@prisma/client` output. The one actually in use
+  (`src/utils/prisma.js`) is deliberately built from the non-standard
+  `node_modules/.prisma/client-active` path (constraint 7 above). This one was not
+  merely unused — it was a landmine: anything that imported it would connect to a
+  client that never learns about a model added since the last default-path
+  `prisma generate`, which nothing in this project runs.
+- `src/utils/authMiddleware.js` — a one-line re-export shim
+  (`module.exports = require('../middleware/authMiddleware')`). Every route already
+  imports the real middleware in `src/middleware/` directly.
+- `src/services/warehouseInsightsService.js` — 260 lines, no importer anywhere.
+
+Also removed (untracked working-tree clutter, not source): stray `.patch` files,
+`drift.sql`, and two SQLite backup snapshots left over from earlier migration work.
+
 ## Remaining, in order
 
 Nothing is unblocked right now.
