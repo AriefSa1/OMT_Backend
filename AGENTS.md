@@ -231,6 +231,54 @@ above stop the app from spending it needlessly and make a real exhaustion say so
 (`errorCode: 'RATE_LIMITED'`) instead of a generic "gagal". Full write-up:
 `docs/AI_SERVICE.md`; `npm run docs:ai` for a terminal summary.
 
+## Perbaikan per halaman — sedang berjalan (mulai 2026-08-06)
+
+Pengguna memberi daftar ketidaksesuaian data per halaman. Dikerjakan **satu halaman per
+commit** supaya pekerjaan tersimpan meski kuota AI habis di tengah jalan.
+
+### Selesai
+
+**Dashboard** — commit `491b484` (backend) + `7ee9e672` (frontend). Enam item: gap riwayat
+iklan (backfill 26 hari), impresi/klik + panah pembanding, briefing AI jadi manual dan
+terstruktur, item hadiah dikecualikan, kategori sungguhan, asal data pembatalan/retur.
+
+**Katalog Shopee** — commit `14e7936` (backend) + `afea4a4d` (frontend). Daftar varian di
+katalog dan halaman produk, peringkat penjualan per varian, dan FITUR 6
+`suggestScaleUpStrategy`.
+
+### Belum dikerjakan — lanjutkan dari sini
+
+**Performa Produk.** Mengklik produk di `/shopee/performance` saat ini merender halaman
+yang sama dengan katalog (`/product/[id]`). Pengguna ingin route tersendiri berisi detail
+performa lengkap dan analisa mendalam yang berfokus pada solusi. Bentuk route belum
+diputuskan — kemungkinan `/shopee/performance/[id]`.
+
+**Iklan.** `AdsAIOptimizerCard` (FITUR 5, `optimizeAdsKeywordsAndBids`) sudah tidak
+relevan: iklan Shopee sekarang tidak lagi memakai bid per kata kunci, sehingga saran
+negative keyword dan penyesuaian bid tidak dapat dieksekusi pengguna. Ganti pendekatannya
+menjadi kalkulator margin per produk yang diiklankan:
+- input manual: HPP, omset, biaya admin marketplace
+- hitung apakah produk masih untung setelah biaya iklan, berdasarkan ROAS yang didapat
+- dipicu saat produk yang diiklankan diklik → butuh halaman baru yang belum ada
+
+Catatan desain: kalkulasi margin adalah aritmetika biasa dan HARUS dihitung di kode, bukan
+diminta ke model — pola yang sama seperti `simulateDynamicPricing`, yang mengembalikan
+`calculations` sebagai `trusted` sehingga keluaran model tidak dapat menimpanya. Model
+hanya boleh menambah interpretasi di atas angka yang sudah pasti.
+
+### Menunggu verifikasi (kuota Gemini habis 2026-08-06 dini hari)
+
+Dua fitur AI belum pernah dijalankan terhadap Gemini sungguhan — jalankan ulang setelah
+kuota harian (20/hari) reset, sebelum menganggapnya selesai:
+
+1. **Briefing harian** dengan prompt baru. Percobaan pertama gagal `INVALID_RESPONSE`
+   (JSON terpotong). Perbaikannya sudah diterapkan — permintaan JSON dipindah dari kalimat
+   prompt ke parameter API (`responseMimeType: 'application/json'`) dan `thinkingConfig`
+   dimatikan supaya token berpikir tidak memakan anggaran keluaran — tapi perbaikan itu
+   sendiri belum terbukti terhadap respons sungguhan.
+2. **Strategi scale-up** (`suggestScaleUpStrategy`). Jalur `MISSING_INPUT` dan
+   `NOT_CONFIGURED` sudah lolos di `npm run test:ai`, jalur suksesnya belum.
+
 ## Dead code removed (2026-08-05)
 
 Each item below was verified to have zero references anywhere in the repo (`grep` across
