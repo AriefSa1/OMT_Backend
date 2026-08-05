@@ -237,6 +237,58 @@ class ShopeeService {
         })
       )
     );
+
+    await this.persistProductVariations(storeId, products);
+  }
+
+  /**
+   * Per-variation SKU and stock, normalised from `item.model_list` at fetch time.
+   *
+   * Two things need this. `ShopeeProduct.stock` is one store-wide number, so it cannot
+   * be compared meaningfully against per-warehouse stock. And `ShopeeProduct.sku` falls
+   * back to the Shopee item id when parent_sku is empty — precisely the case where the
+   * real SKU sits at variation level.
+   */
+  async persistProductVariations(storeId, products) {
+    const dataAsOf = new Date();
+
+    for (const product of products) {
+      const itemId = product.shopeeItemId;
+      if (!itemId) continue;
+
+      const variations = Array.isArray(product.variations) ? product.variations : [];
+      const seenModelIds = variations.map((variation) => String(variation.id || '')).filter(Boolean);
+
+      const operations = variations
+        .filter((variation) => variation.id)
+        .map((variation) => {
+          const row = {
+            storeId,
+            shopeeItemId: itemId,
+            shopeeModelId: String(variation.id),
+            name: variation.name || '',
+            variationSku: String(variation.sku || '').trim(),
+            stock: Number(variation.stock || 0),
+            soldCount: Number(variation.soldCount || 0),
+            dataAsOf,
+          };
+          return prisma.shopeeListingVariation.upsert({
+            where: { shopeeItemId_shopeeModelId: { shopeeItemId: itemId, shopeeModelId: row.shopeeModelId } },
+            update: row,
+            create: row,
+          });
+        });
+
+      // Drop variations the seller has since removed, so stock totals do not include
+      // models that no longer exist.
+      operations.push(
+        prisma.shopeeListingVariation.deleteMany({
+          where: { shopeeItemId: itemId, shopeeModelId: { notIn: seenModelIds.length ? seenModelIds : [''] } },
+        })
+      );
+
+      await prisma.$transaction(operations);
+    }
   }
 
   async persistOrderSummary(storeId, summary) {

@@ -57,7 +57,40 @@ model ShopeeProduct {
   platformFeePercent Float?
   updatedAt     DateTime @updatedAt
 
+  variations    ShopeeListingVariation[]
+
   @@index([storeId, category])
+}
+
+/// One sellable unit of a Shopee listing.
+///
+/// shopeeService already normalises `item.model_list` into per-variation
+/// {id, name, sku, stock, soldCount}, but persistProducts discarded it. Two things
+/// depend on keeping it:
+///
+///  - `ShopeeProduct.stock` is a single store-wide number, which is why reconciliation
+///    had nothing meaningful to compare a per-warehouse stock figure against.
+///  - `ShopeeProduct.sku` falls back to the Shopee item id when parent_sku is empty,
+///    which is exactly when the real SKU lives at variation level. Warehouse-shaped
+///    SKUs are most likely to appear here.
+model ShopeeListingVariation {
+  id            String   @id @default(uuid())
+  storeId       String
+  shopeeItemId  String
+  shopeeModelId String
+  name          String   @default("")
+  variationSku  String   @default("")
+  stock         Int      @default(0)
+  soldCount     Int      @default(0)
+  dataAsOf      DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  product ShopeeProduct @relation(fields: [shopeeItemId], references: [shopeeItemId], onDelete: Cascade)
+
+  @@unique([shopeeItemId, shopeeModelId])
+  @@index([variationSku])
+  @@index([storeId])
 }
 
 model ShopeeOrderSummary {
