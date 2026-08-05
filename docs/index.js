@@ -8,6 +8,7 @@ const DOCS = [
   { file: 'docs/API_REFERENCE.md', desc: 'Setiap endpoint: field respons, sumbernya, cara mengubahnya' },
   { file: 'docs/VALUES_AND_THRESHOLDS.md', desc: 'Konstanta bisnis (ambang, bobot, divisor) dan lokasinya' },
   { file: 'docs/AI_SERVICE.md', desc: 'Fitur AI: 5 fungsi, retry/kuota Gemini, cara mengubah prompt' },
+  { file: 'docs/DEPLOYMENT.md', desc: 'Rencana deploy Render + Hostinger, migrasi basis data, dan blokir keamanan' },
   { file: 'AGENTS.md', desc: 'Panduan repo: konvensi, constraint data, riwayat pekerjaan' },
 ];
 
