@@ -26,6 +26,7 @@ class OptimizationService {
       storeHealthScore: healthScore(recommendations),
       decorationsAndPromos: recommendations,
       meta: data.sources.warehouse,
+      reconciliationTrust: data.reconciliationTrust,
       message: recommendations.length
         ? 'Metrik kesehatan toko belum tersedia karena endpoint sumber belum terhubung.'
         : data.sources.warehouse.message || 'Metrik kesehatan toko belum tersedia karena endpoint sumber belum terhubung.',

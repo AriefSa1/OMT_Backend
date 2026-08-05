@@ -895,6 +895,9 @@ class SnapshotService {
       recommendationTotal: allRecommendations.length,
       tasks: sortTasksByPriority(tasks),
       sources: { catalog: catalog.meta, ads: ads.meta, warehouse: warehouse.meta },
+      // Without this, an empty warehouse recommendation list is indistinguishable from
+      // "every SKU matched" — and reconciliation is currently not computable at all.
+      reconciliationTrust: warehouse.reconciliationTrust,
     };
   }
 

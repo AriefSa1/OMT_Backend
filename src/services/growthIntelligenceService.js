@@ -35,6 +35,9 @@ class GrowthIntelligenceService {
         message: 'Prakiraan permintaan belum dihitung. Sistem belum menjalankan model prakiraan apa pun, dan angka tidak diestimasi agar tidak menyesatkan.',
       },
       restockPlan: warehouseRecommendations,
+      // An empty restock plan means "no discrepancy found" only when reconciliation was
+      // trustworthy. Ship the verdict so the UI cannot imply an all-clear it did not earn.
+      reconciliationTrust: actions.reconciliationTrust,
       priceStrategies: productRecommendations.filter((item) => item.type === 'CONVERSION_REVIEW'),
       voucherAnalysis: {
         voucherSpend: ads.voucherSpend,
