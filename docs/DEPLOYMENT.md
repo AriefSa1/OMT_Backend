@@ -22,6 +22,16 @@ Postur keamanan runtime sudah diverifikasi terhadap deploy langsung:
 - Fallback JWT publik sudah dihapus — produksi kini wajib `JWT_SECRET` (Render menyetelnya
   otomatis; diverifikasi token invalid → 401, bukan 500).
 
+Pengerasan deploy (2026-08-06, diuji lokal 9/9 + bootstrap):
+- **Registrasi terbuka DITUTUP.** Dulu `POST /api/auth/register` tanpa auth — siapa pun
+  bisa mendaftar dan melihat data toko. Sekarang wajib kode undangan `REGISTRATION_SECRET`
+  (kecuali user pertama saat DB kosong → jadi ADMIN). **Set `REGISTRATION_SECRET` di Render
+  Environment** agar bisa menambah user lewat form; tanpa itu, pakai `node manage_admin.js`.
+- **Rate limit** `/api/auth`: 20 percobaan / 15 mnt / IP (setel via `AUTH_RATE_LIMIT_MAX`).
+- **Header keamanan**: `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, HSTS (produksi).
+- **Batas body** 1 MB; `x-powered-by` disembunyikan; `trust proxy` untuk IP nyata di Render.
+- Frontend: form daftar menampilkan field **Kode undangan**; cookie rute `Secure` di HTTPS.
+
 **Yang MASIH terbuka dan hanya Anda yang bisa tuntaskan** — lihat §0.1. Keputusan Anda
 2026-08-06: repo **tetap publik** dan riwayat **tidak** ditulis ulang. Konsekuensinya
 kredensial di riwayat harus dianggap bocor permanen sampai **dirotasi**.

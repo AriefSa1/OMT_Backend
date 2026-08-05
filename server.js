@@ -11,6 +11,9 @@ const shopeeService = require('./src/services/shopeeService');
 const warehouseService = require('./src/services/warehouseService');
 const { initCronJobs } = require('./src/cron/syncCron');
 
+const { securityHeaders } = require('./src/middleware/securityHeaders');
+const { createRateLimiter } = require('./src/middleware/rateLimit');
+
 const authRoutes = require('./src/routes/authRoutes');
 const settingsRoutes = require('./src/routes/settingsRoutes');
 const shopeeRoutes = require('./src/routes/shopeeRoutes');
@@ -25,6 +28,12 @@ const taskRoutes = require('./src/routes/taskRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Render menaruh server di belakang proxy. Tanpa ini, req.ip berisi IP proxy (sama untuk
+// semua orang) sehingga rate limit per-IP tak berguna, dan Express bisa salah menilai
+// koneksi sebagai tidak-aman. Satu hop proxy.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
 const allowedOriginsConfig = process.env.CORS_ALLOWED_ORIGINS
   ? process.env.CORS_ALLOWED_ORIGINS.split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean)
@@ -56,10 +65,22 @@ const corsOptions = {
   credentials: true,
 };
 
+app.use(securityHeaders);
 app.use(cors(corsOptions));
-app.use(express.json());
+// Batasi ukuran body: dashboard hanya mengirim JSON kecil (form login, pengaturan). 1 MB
+// sudah longgar, sekaligus menutup upaya menghabiskan memori lewat payload raksasa.
+app.use(express.json({ limit: '1mb' }));
 
-app.use('/api/auth', authRoutes);
+// Rate limit khusus endpoint auth — pertahanan brute-force. 20 percobaan / 15 menit / IP
+// cukup untuk pemakaian sah (salah ketik sandi), tapi mematikan untuk penebakan otomatis.
+// Bisa disetel lewat AUTH_RATE_LIMIT_MAX bila perlu.
+const authLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX) || 20,
+  message: 'Terlalu banyak percobaan autentikasi. Coba lagi dalam beberapa menit.',
+});
+
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/shopee', shopeeRoutes);
 app.use('/api/warehouse', warehouseRoutes);

@@ -18,3 +18,8 @@ services:
         value: https://94media.art,https://www.94media.art
       - key: GEMINI_API_KEY
         sync: false
+      # Kode undangan untuk pendaftaran akun. Tanpa ini, pendaftaran mandiri tertutup
+      # (kecuali user pertama saat basis data masih kosong). Isi di dashboard Render lalu
+      # bagikan hanya ke orang yang boleh punya akun.
+      - key: REGISTRATION_SECRET
+        sync: false

@@ -21,6 +21,29 @@ async function register(req, res) {
   try {
     const { name, email, password } = req.body;
 
+    // Kontrol akses registrasi. Aplikasi ini terdeploy publik di 94media.art dan datanya
+    // adalah angka penjualan/gudang nyata satu toko — registrasi terbuka berarti siapa pun
+    // yang menemukan URL-nya bisa membuat akun dan melihat semuanya. Aturannya:
+    //
+    // - Bila belum ada user sama sekali (deploy baru), izinkan satu pendaftaran pertama
+    //   sebagai bootstrap admin, tanpa kode. Ini menghindari masalah "ayam dan telur".
+    // - Selain itu, wajib kode undangan yang cocok dengan REGISTRATION_SECRET (dikirim
+    //   lewat header x-registration-secret atau field registrationSecret).
+    // - Bila REGISTRATION_SECRET tidak diset dan sudah ada user, registrasi ditutup total;
+    //   tambah user lewat manage_admin.js. Gagal-tertutup, bukan gagal-terbuka.
+    const userCount = await prisma.user.count();
+    const isBootstrap = userCount === 0;
+    if (!isBootstrap) {
+      const configuredSecret = (process.env.REGISTRATION_SECRET || '').trim();
+      const providedSecret = String(req.headers['x-registration-secret'] || req.body?.registrationSecret || '').trim();
+      if (!configuredSecret) {
+        return res.status(403).json({ success: false, error: 'Pendaftaran mandiri dinonaktifkan. Hubungi administrator.' });
+      }
+      if (providedSecret !== configuredSecret) {
+        return res.status(403).json({ success: false, error: 'Kode undangan tidak valid.' });
+      }
+    }
+
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
     }
@@ -51,7 +74,8 @@ async function register(req, res) {
         name: name.trim(),
         email: normalizedEmail,
         password: hashedPassword,
-        role: 'ANALYST'
+        // User pertama (bootstrap) menjadi ADMIN supaya selalu ada pemilik; sisanya ANALYST.
+        role: isBootstrap ? 'ADMIN' : 'ANALYST'
       }
     });
 
