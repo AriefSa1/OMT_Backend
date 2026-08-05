@@ -29,8 +29,10 @@ npm run prisma:generate
 ```
 
 ```bash
-npm run prisma:db:push
+npm run prisma:migrate:deploy
 ```
+
+`prisma:db:push` no longer exists and must not be reintroduced — see constraint 5 below.
 
 ## Coding Style & Naming Conventions
 
@@ -59,3 +61,147 @@ Pull requests should include a short summary, affected API areas, database or Pr
 ## Security & Configuration Tips
 
 Keep secrets out of Git. `.env` and SQLite database files are ignored; use variables such as `DATABASE_URL`, `PORT`, and `JWT_SECRET` locally. Do not commit Shopee cookies, warehouse credentials, Gemini API keys, or database backups. When changing auth or sync behavior, verify both protected and unauthenticated routes.
+
+---
+
+# Hard Constraints — Data Validity
+
+Everything above describes *how* to write code here. This section describes what the code
+is **not allowed to produce**. These are rules, not suggestions: each traces to a defect
+found in the audit that produced the current state of this repo.
+
+The project's absolute requirement is that **no fabricated data reaches the web UI**.
+
+### 1. Never render an unmeasured figure as `0`
+
+A value with no source must be `null`, and the UI must show an explicit status with a
+reason. `0` reads as "no problems" — that is a lie to the user.
+
+Follow the pattern already in `src/services/snapshotService.js`:
+
+```js
+discrepanciesCount: reconciliationTrust.reliable
+  ? number(reconciliationStats?.discrepanciesCount)
+  : null,
+```
+
+### 2. Never present a constant as analysis
+
+No hardcoded value may be surfaced as if it were computed or AI-generated. If the source
+does not exist yet, say "not available" — do not fill the gap with a guess.
+
+### 3. No performance claim without before/after measurement
+
+Measure against the real database: `prisma/dev.db.before-audit-20260804.bak` (68 MB,
+26,212 warehouse items, 148,533 reconciliation rows). Copy it first — never benchmark
+against a live database.
+
+### 4. Optimisation must not change output
+
+Capture the old output across several parameter combinations, rewrite, then diff field by
+field. `getWarehouseSnapshot` was verified this way across 11 cases: default, paging,
+search, per-warehouse, four sort orders, type filter, limit 100, team filter. Every field
+must match before committing.
+
+### 5. Never use `prisma db push` on a database holding data
+
+Use `prisma migrate`. The full baselining procedure is in `prisma/migrations/README.md`.
+
+Renaming a model without `@@map` under `db push` **drops the underlying table** — and
+`StockReconciliation` holds ~148k audit rows. The `prisma:db:push` script was removed for
+this reason; do not add it back.
+
+### 6. Migrations must be additive
+
+`DROP TABLE` may appear only inside a `RedefineTables` block, preceded by the
+`INSERT … SELECT` that copies the rows. A `DROP TABLE` outside such a block loses data.
+Read the generated SQL before applying it.
+
+### 7. Run `npx prisma generate` after every schema change
+
+The generator writes to the non-standard path `node_modules/.prisma/client-active`
+(`prisma/schema.prisma:9`) and never refreshes itself. A stale client makes a new model
+surface as `undefined` at runtime.
+
+### 8. Never run a real Shopee sync without explicit user permission
+
+A sync calls the Seller Center API on the user's shop. That is an outward-facing action —
+ask first.
+
+### 9. Supplementary writes must fail soft
+
+If you add a write that is secondary to the main flow, wrap it so its failure cannot take
+the parent down. Reference: `src/services/shopeeService.js:466` (order summary) and the
+variation write inside `persistProducts`.
+
+### 10. Do not add work outside the plan
+
+If you find a new problem, record it and report it. Do not start on it.
+
+---
+
+# State & Remaining Work
+
+## Already done — do not redo
+
+Verify with `git log`.
+
+**Correctness** — cross-product data leak from `OR: [{sku}, {}]`; sessions surviving
+refresh; async rejections routed to error middleware; failed responses no longer cached;
+fabricated AI content removed; unmeasured zeros replaced with `null` throughout.
+
+**Schema & sync** — migrations baseline (`prisma/migrations/0_init` + README); Shopee
+listing variations persisted (`ShopeeListingVariation`) with fail-soft writes; mapping
+schema added (`ProductMapping`, `ProductMappingComponent`) — **deliberately not read by
+anything yet**.
+
+**Performance & reliability** — `getWarehouseSnapshot` paged in SQL (default page
+4,188 ms → 365 ms, response 5.85 MB → 36 KB, output identical across 11 parameter
+combinations); catalog filtering moved server-side so `pagination.total` reflects the
+filter; the product-metrics `take` cap lifted; the stock-movement N+1 replaced with a
+batched `createMany`; the full delete-and-reinsert of the warehouse table replaced with a
+stale-id diff; `/optimization/*` reduced to a single shared snapshot; task ordering moved
+to `src/utils/taskOrdering.js` so status sorts by priority rather than alphabetically.
+
+**Removed rather than faked** — the store-health metrics (`chatResponseRate`,
+`fulfillmentSpeed`, `storeRating`, `cancellationRate`) had no source and were dropped from
+the contract instead of being filled with constants. That is the correct resolution.
+
+## Remaining, in order
+
+1. **`src/controllers/optimizationController.js:35,37`** — `activeAdCampaigns: []` and
+   `productSignals: []` are hardcoded even though
+   `shopeeInsightsService.buildProductSignals()` is implemented. Wire it up.
+
+2. **`src/services/growthIntelligenceService.js:30,41`** — `demandForecast` and
+   `bundleSuggestions` are `[]` stubs. Surface them as "not available" with a reason; do
+   not fill them with invented numbers.
+
+## Blocked — do not force
+
+3. **Order summary / GMV** — waiting on an endpoint from the user. Until it exists the
+   honest `history.message` stays. Do not substitute an estimate.
+
+4. **`src/services/warehouseService.js:728`** — `StockMovement` only ever receives
+   `type: 'OUT'` (see also `:745`, `:1311`, `:1382`), so **"Total Masuk" is structurally
+   always 0** yet still rendered. Hide it until a source exists, or integrate a
+   goods-receipt endpoint if the user provides one.
+
+## SKU mapping — needs one real catalog sync
+
+5. Requires a real sync (see constraint 8 — ask permission first). Then:
+
+   ```bash
+   node src/scripts/checkSkuMappingFeasibility.js
+   ```
+
+   The output decides the shape of the mapping UI and must not be guessed:
+
+   - **Variation SKUs match warehouse SKUs** → mapping is mostly automatic, the UI is just
+     a review screen.
+   - **Empty** → 167 listings assembled by hand (~500–670 component rows), so the UI has
+     to be an efficient set-builder.
+
+   Background: a Shopee listing is a **SET**; a warehouse item is a **COMPONENT**.
+   Name-based matching was measured and produced **zero** matches out of 26,212 items — do
+   not rebuild name matching.
