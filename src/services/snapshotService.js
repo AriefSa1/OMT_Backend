@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const { sortTasksByPriority } = require('../utils/taskOrdering');
 const {
   ACTIVE_WAREHOUSES,
   ACTIVE_WAREHOUSE_ID_LIST,
@@ -154,14 +155,9 @@ class SnapshotService {
     };
     const allowedSort = new Set(['updatedAt', 'name', 'price', 'stock', 'salesCount', 'views']);
     const orderBy = { [allowedSort.has(sort) ? sort : 'updatedAt']: direction === 'asc' ? 'asc' : 'desc' };
-    const [total, products, metrics, categoryRows] = await Promise.all([
+    const [total, products, categoryRows] = await Promise.all([
       prisma.shopeeProduct.count({ where }),
       prisma.shopeeProduct.findMany({ where, orderBy, skip: (safePage - 1) * safeLimit, take: safeLimit }),
-      prisma.productMetricSnapshot.findMany({
-        where: session?.storeId ? { storeId: session.storeId } : {},
-        orderBy: { dataAsOf: 'desc' },
-        take: 500,
-      }),
       prisma.shopeeProduct.findMany({
         where: storeWhere,
         select: { category: true },
@@ -169,6 +165,16 @@ class SnapshotService {
         orderBy: { category: 'asc' },
       }),
     ]);
+    const productIds = products.map((product) => product.shopeeItemId);
+    const metrics = productIds.length
+      ? await prisma.productMetricSnapshot.findMany({
+        where: {
+          ...(session?.storeId ? { storeId: session.storeId } : {}),
+          shopeeItemId: { in: productIds },
+        },
+        orderBy: { dataAsOf: 'desc' },
+      })
+      : [];
     const latestMetrics = new Map(getLatestBy(metrics, 'shopeeItemId').map((metric) => [metric.shopeeItemId, metric]));
     const dataAsOf = maxDate([metrics[0]?.dataAsOf, session?.lastSyncedAt]);
     const meta = freshnessMeta({
@@ -338,16 +344,22 @@ class SnapshotService {
   }
 
   async getProductSnapshot(itemId) {
-    const [product, metrics] = await Promise.all([
-      prisma.shopeeProduct.findUnique({ where: { shopeeItemId: String(itemId) } }),
+    const product = await prisma.shopeeProduct.findUnique({ where: { shopeeItemId: String(itemId) } });
+    if (!product) return null;
+    const [metrics, session, warehouseRows] = await Promise.all([
       prisma.productMetricSnapshot.findMany({
         where: { shopeeItemId: String(itemId) },
         orderBy: { date: 'desc' },
         take: 30,
       }),
+      prisma.storeSession.findUnique({ where: { storeId: product.storeId } }),
+      product.sku
+        ? prisma.warehouseItem.findMany({
+          where: { sku: product.sku, warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST } },
+          select: { availableStock: true },
+        })
+        : Promise.resolve([]),
     ]);
-    if (!product) return null;
-    const session = await prisma.storeSession.findUnique({ where: { storeId: product.storeId } });
     const latestMetric = metrics[0] || null;
     const meta = freshnessMeta({
       source: SOURCE.SHOPEE,
@@ -383,6 +395,9 @@ class SnapshotService {
           estimatedMarginPercent: estimatedMargin === null || !number(product.price) ? null : (estimatedMargin / number(product.price)) * 100,
         },
       },
+      warehouseStock: warehouseRows.length
+        ? warehouseRows.reduce((sum, row) => sum + number(row.availableStock), 0)
+        : null,
       meta,
     };
   }
@@ -857,7 +872,7 @@ class SnapshotService {
       this.getWarehouseSnapshot({ page: 1, limit: 100 }),
       prisma.optimizationTask.findMany({
         include: { events: { orderBy: { createdAt: 'desc' }, take: 5 } },
-        orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+        orderBy: { updatedAt: 'desc' },
         take: 200,
       }),
     ]);
@@ -878,7 +893,7 @@ class SnapshotService {
     return {
       recommendations: allRecommendations.slice(0, 100),
       recommendationTotal: allRecommendations.length,
-      tasks,
+      tasks: sortTasksByPriority(tasks),
       sources: { catalog: catalog.meta, ads: ads.meta, warehouse: warehouse.meta },
     };
   }

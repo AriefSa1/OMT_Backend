@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { randomUUID } = require('crypto');
 const prisma = require('../utils/prisma');
 const {
   ACTIVE_WAREHOUSES,
@@ -705,7 +706,7 @@ class WarehouseService {
       const res = await this.fetchAuthenticatedData(url);
       const orders = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
 
-      let insertedCount = 0;
+      const candidates = new Map();
       for (const ord of orders) {
         const orderRef = this.toText(ord.ref_id || ord.id || ord.tracking_number, `ORD-${ord.id}`);
         const mpSource = ord.order_mp?.mp_type ? ord.order_mp.mp_type.toUpperCase() : 'PDC_ORDER';
@@ -717,33 +718,38 @@ class WarehouseService {
             const qty = Number(item.count || item.quantity || 1);
             const productName = this.toText(item.name || item.product?.name, 'Produk Gudang');
 
-            if (sku) {
-              const existing = await prisma.stockMovement.findFirst({
-                where: { sku, reference: orderRef, type: 'OUT' },
-              });
-              if (!existing) {
-                await prisma.stockMovement.create({
-                  data: {
-                    sku,
-                    productId: item.product_id || item.product?.id || null,
-                    productName,
-                    type: 'OUT',
-                    quantity: qty,
-                    reference: orderRef,
-                    source: mpSource,
-                    note: `Pesanan keluar status: ${ord.order_status || 'PROCESSED'}`,
-                    warehouseId: 38,
-                    warehouseName: 'PDC Warehouse (Center)',
-                    timestamp: orderDate,
-                  },
-                });
-                insertedCount++;
-              }
-            }
+            if (!sku) continue;
+            const key = `${sku}\u0000${orderRef}`;
+            const existingCandidate = candidates.get(key);
+            candidates.set(key, {
+              sku,
+              productId: item.product_id || item.product?.id || null,
+              productName,
+              type: 'OUT',
+              quantity: (existingCandidate?.quantity || 0) + qty,
+              reference: orderRef,
+              source: mpSource,
+              note: `Pesanan keluar status: ${ord.order_status || 'PROCESSED'}`,
+              warehouseId: 38,
+              warehouseName: 'PDC Warehouse (Center)',
+              timestamp: orderDate,
+            });
           }
         }
       }
-      return insertedCount;
+
+      const rows = Array.from(candidates.values());
+      if (!rows.length) return 0;
+      const references = [...new Set(rows.map((row) => row.reference))];
+      const existingRows = await prisma.stockMovement.findMany({
+        where: { type: 'OUT', reference: { in: references } },
+        select: { sku: true, reference: true },
+      });
+      const existingKeys = new Set(existingRows.map((row) => `${row.sku}\u0000${row.reference}`));
+      const newRows = rows.filter((row) => !existingKeys.has(`${row.sku}\u0000${row.reference}`));
+      if (!newRows.length) return 0;
+      const result = await prisma.stockMovement.createMany({ data: newRows });
+      return result.count;
     } catch (err) {
       console.warn('[Warehouse Service] Failed to fetch outbound order movements:', err.message);
       return 0;
@@ -1067,11 +1073,41 @@ class WarehouseService {
       lastUpdated: now,
     }));
 
+    const previousRows = await prisma.warehouseItem.findMany({
+      where: { warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST } },
+      select: { id: true, sku: true, warehouseId: true },
+    });
+    if (previousRows.length >= 20 && dataToInsert.length < Math.ceil(previousRows.length * 0.7)) {
+      const error = new Error(`Snapshot gudang tampak tidak lengkap (${dataToInsert.length} dari ${previousRows.length} SKU tersimpan). Data lama dipertahankan.`);
+      error.code = 'WAREHOUSE_PARTIAL_SNAPSHOT';
+      throw error;
+    }
+
+    const previousByKey = new Map(previousRows.map((row) => [`${row.sku}:${row.warehouseId}`, row]));
+    const incomingKeys = new Set(dataToInsert.map((row) => `${row.sku}:${row.warehouseId}`));
+    const staleIds = previousRows.filter((row) => !incomingKeys.has(`${row.sku}:${row.warehouseId}`)).map((row) => row.id);
+    const columns = [
+      'id', 'sku', 'name', 'size', 'color', 'totalStock', 'reservedStock', 'availableStock',
+      'imageUrl', 'location', 'warehouseId', 'warehouseName', 'warehouseLocation', 'stockSource',
+      'teamId', 'teamName', 'teamCode', 'productType', 'priceMin', 'priceMax', 'category', 'refId',
+      'desc', 'bundleCount', 'isPriority', 'isCrossLocked', 'rawProductId', 'rawVariationId', 'lastUpdated',
+    ];
+    const updateColumns = columns.filter((column) => !['id', 'sku', 'warehouseId'].includes(column));
+
     await prisma.$transaction(async (tx) => {
-      await tx.warehouseItem.deleteMany({ where: { warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST } } });
-      const chunkSize = 500;
+      const chunkSize = 100;
       for (let i = 0; i < dataToInsert.length; i += chunkSize) {
-        await tx.warehouseItem.createMany({ data: dataToInsert.slice(i, i + chunkSize) });
+        const chunk = dataToInsert.slice(i, i + chunkSize).map((row) => ({
+          id: previousByKey.get(`${row.sku}:${row.warehouseId}`)?.id || randomUUID(),
+          ...row,
+        }));
+        const placeholders = chunk.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ');
+        const values = chunk.flatMap((row) => columns.map((column) => row[column]));
+        const sql = `INSERT INTO "WarehouseItem" (${columns.map((column) => `"${column}"`).join(', ')}) VALUES ${placeholders} ON CONFLICT("sku", "warehouseId") DO UPDATE SET ${updateColumns.map((column) => `"${column}" = excluded."${column}"`).join(', ')}`;
+        await tx.$executeRawUnsafe(sql, ...values);
+      }
+      for (let i = 0; i < staleIds.length; i += 500) {
+        await tx.warehouseItem.deleteMany({ where: { id: { in: staleIds.slice(i, i + 500) } } });
       }
     }, { maxWait: 30000, timeout: 180000 });
 
@@ -1272,7 +1308,7 @@ class WarehouseService {
 
     // 3. Fetch Stock Movement History
     const movements = await prisma.stockMovement.findMany({
-      where: { sku: { in: historySkus } },
+      where: { sku: { in: historySkus }, type: 'OUT' },
       orderBy: { timestamp: 'desc' },
       take: 50,
     });
@@ -1292,7 +1328,6 @@ class WarehouseService {
     });
 
     // Compute stock stats
-    const totalIn = movements.filter((m) => m.type === 'IN').reduce((acc, m) => acc + m.quantity, 0);
     const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
     const currentStock = item ? item.availableStock : 0;
     const valuation = item ? (item.priceMin || 0) * (item.totalStock || 0) : 0;
@@ -1313,13 +1348,17 @@ class WarehouseService {
       product: item,
       shopeeProduct,
       stats: {
-        totalIn,
         totalOut,
         currentStock,
         valuation,
         movementCount: movements.length,
       },
       movements,
+      movementAvailability: {
+        inbound: false,
+        outbound: true,
+        message: 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
+      },
       snapshots,
       reconciliations,
       warehouseSkuDetail,
@@ -1329,24 +1368,30 @@ class WarehouseService {
   }
 
   async getProductStockHistory(sku, { limit = 50, type = null } = {}) {
-    const where = { sku };
-    if (type) where.type = type.toUpperCase();
+    const requestedType = type ? type.toUpperCase() : 'OUT';
+    const movementAvailability = {
+      inbound: false,
+      outbound: true,
+      message: 'Riwayat penerimaan stok belum tersedia karena endpoint sumber belum terhubung.',
+    };
+    if (requestedType === 'IN') {
+      return { sku, totalOut: 0, count: 0, movements: [], movementAvailability };
+    }
 
     const movements = await prisma.stockMovement.findMany({
-      where,
+      where: { sku, type: 'OUT' },
       orderBy: { timestamp: 'desc' },
       take: Number(limit) || 50,
     });
 
-    const totalIn = movements.filter((m) => m.type === 'IN').reduce((acc, m) => acc + m.quantity, 0);
     const totalOut = movements.filter((m) => m.type === 'OUT').reduce((acc, m) => acc + m.quantity, 0);
 
     return {
       sku,
-      totalIn,
       totalOut,
       count: movements.length,
       movements,
+      movementAvailability,
     };
   }
 

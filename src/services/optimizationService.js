@@ -24,15 +24,11 @@ class OptimizationService {
     const recommendations = data.recommendations.filter((item) => item.source === 'GUDANG');
     return {
       storeHealthScore: healthScore(recommendations),
-      metrics: {
-        chatResponseRate: null,
-        fulfillmentSpeed: null,
-        storeRating: null,
-        cancellationRate: null,
-      },
       decorationsAndPromos: recommendations,
       meta: data.sources.warehouse,
-      message: recommendations.length ? null : data.sources.warehouse.message,
+      message: recommendations.length
+        ? 'Metrik kesehatan toko belum tersedia karena endpoint sumber belum terhubung.'
+        : data.sources.warehouse.message || 'Metrik kesehatan toko belum tersedia karena endpoint sumber belum terhubung.',
     };
   }
 

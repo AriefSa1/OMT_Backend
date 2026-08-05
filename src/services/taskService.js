@@ -1,4 +1,5 @@
 const prisma = require('../utils/prisma');
+const { sortTasksByPriority } = require('../utils/taskOrdering');
 
 const TASK_STATUS = ['PROPOSED', 'APPROVED', 'IN_PROGRESS', 'COMPLETED', 'SKIPPED'];
 
@@ -18,10 +19,10 @@ class TaskService {
     const tasks = await prisma.optimizationTask.findMany({
       where,
       include: { events: { orderBy: { createdAt: 'desc' }, take: 20 } },
-      orderBy: [{ status: 'asc' }, { updatedAt: 'desc' }],
+      orderBy: { updatedAt: 'desc' },
       take: Math.min(Math.max(Number(limit) || 100, 1), 200),
     });
-    return tasks.map(toTask);
+    return sortTasksByPriority(tasks).map(toTask);
   }
 
   async create({ recommendationId, type, title, description, source, entityType, entityId, priority = 'MEDIUM' }, actor = null) {

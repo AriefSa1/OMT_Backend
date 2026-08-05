@@ -144,7 +144,13 @@ Kembalikan JSON murni dengan 3 variasi (SEO_OPTIMIZED, PROMO_DRIVEN, EMOTIONAL_B
   }
 
   // 4. FITUR 2: AI Predictive Restock & Deadstock Liquidation Playbook
-  async predictRestockAndLiquidation({ name = '', sku = '', stock = 0, salesCount = 0, warehouseStock = 0, leadTimeDays = 7, category = '' }) {
+  async predictRestockAndLiquidation({ name = '', sku = '', stock = 0, salesCount = 0, warehouseStock = null, leadTimeDays = 7, category = '' }) {
+    if (warehouseStock === null || warehouseStock === undefined || warehouseStock === '' || !Number.isFinite(Number(warehouseStock))) {
+      return this.missingInput(
+        { sku, productName: name },
+        'Stok gudang belum dapat dipetakan ke SKU produk ini. Prediksi restock belum dapat dihitung.'
+      );
+    }
     const totalPhysicalStock = Number(stock || 0) + Number(warehouseStock || 0);
     const measuredDays = 30;
     const dailyVelocity = Math.max(0.01, Number(salesCount || 0) / measuredDays);
