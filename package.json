@@ -10,6 +10,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:migrate:dev": "prisma migrate dev",
     "test:ai": "node test-ai-suite.js",
+    "docs": "node docs/index.js",
     "docs:ai": "node docs/explain-ai.js"
   },
   "dependencies": {

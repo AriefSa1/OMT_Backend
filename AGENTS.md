@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+**Dokumentasi lengkap** (arsitektur, referensi field respons tiap endpoint, katalog nilai/
+ambang yang bisa diubah): `npm run docs` untuk daftar, atau langsung baca `docs/`. Mulai dari
+`docs/API_REFERENCE.md` kalau tujuannya mengubah data yang dikembalikan sebuah endpoint.
+
 ## Project Structure & Module Organization
 
 This repository is a Node.js/Express backend for a Shopee marketplace and warehouse analytics service. The entry point is `server.js`, which loads configuration, registers API routes, initializes services, and starts cron jobs.
