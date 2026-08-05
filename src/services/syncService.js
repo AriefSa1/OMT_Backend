@@ -1,4 +1,7 @@
+const { randomUUID } = require('crypto');
 const prisma = require('../utils/prisma');
+const { adaptSql } = require('../utils/sqlHelper');
+const { selectChangedRows } = require('../utils/rowHash');
 const shopeeService = require('./shopeeService');
 const shopeeInsightsService = require('./shopeeInsightsService');
 const warehouseService = require('./warehouseService');
@@ -323,18 +326,83 @@ class SyncService {
       source: source || 'WAREHOUSE_API',
       dataAsOf,
     }));
-    await prisma.$transaction(records.map((record) => prisma.warehouseStockSnapshot.upsert({
-      where: {
-        sku_warehouseId_date: {
-          sku: record.sku,
-          warehouseId: record.warehouseId,
-          date: record.date,
-        },
-      },
-      update: record,
-      create: record,
-    })));
-    return records.length;
+    // Satu upsert Prisma per baris berarti satu perjalanan ke basis data per baris: untuk
+    // katalog 27 ribu SKU itu 27 ribu perjalanan, yang terhadap Neon (Singapura) memakan
+    // waktu berpuluh menit dan membuat sync gudang seolah menggantung. Diganti dengan
+    // INSERT banyak-baris yang dipotong-potong, persis pola persistItems di
+    // warehouseService — statement disusun dulu lalu dijalankan sebagai satu transaksi
+    // array, sehingga tetap atomik.
+    //
+    // Catatan tentang NULL: kunci uniknya (sku, warehouseId, date) memuat kolom nullable,
+    // dan di PostgreSQL NULL tidak pernah sama dengan NULL sehingga ON CONFLICT tidak akan
+    // mengenali baris lama bila warehouseId kosong. Baris seperti itu memang tidak
+    // seharusnya ada di sini — semuanya berasal dari gudang aktif — jadi disaring lebih
+    // dulu daripada diam-diam menumpuk duplikat setiap hari.
+    //
+    // Dedup: PostgreSQL menolak satu perintah INSERT yang menyentuh baris konflik yang sama
+    // dua kali ("ON CONFLICT DO UPDATE command cannot affect row a second time"), sedangkan
+    // upsert satu per satu dulu diam-diam saling menimpa. Perilaku lama dipertahankan
+    // (entri terakhir menang) tetapi sekarang dilakukan sebelum SQL dibentuk.
+    const deduped = new Map();
+    for (const record of records) {
+      if (record.warehouseId === null || record.warehouseId === undefined) continue;
+      deduped.set(`${record.sku}:${record.warehouseId}:${record.date}`, record);
+    }
+    const persistable = [...deduped.values()];
+    if (!persistable.length) return 0;
+
+    const columns = [
+      'id', 'sku', 'date', 'name', 'totalStock', 'reservedStock', 'availableStock',
+      'warehouseId', 'warehouseName', 'teamId', 'teamName', 'productType', 'source',
+      'dataAsOf', 'updatedAt', 'contentHash',
+    ];
+    const updateColumns = columns.filter((column) => !['id', 'sku', 'warehouseId', 'date'].includes(column));
+    const chunkSize = Math.max(1, Math.floor(30000 / columns.length));
+    const updatedAt = new Date();
+
+    // Sama seperti persistItems: yang mahal adalah mengirim muatannya, bukan kerja tulis di
+    // sisi server. Baris yang isinya tidak berubah tidak dikirim ulang; `dataAsOf` dan
+    // `updatedAt` dikecualikan dari sidik jari lalu disegarkan lewat satu UPDATE menyeluruh
+    // supaya artinya tetap "terakhir disentuh sync".
+    //
+    // Batas yang sama seperti di persistItems berlaku: sidik jari mencatat apa yang terakhir
+    // ditulis, bukan isi baris sekarang. Di sini tidak perlu penanganan khusus — kuncinya
+    // memuat `date`, jadi sync pertama setiap hari tidak menemukan baris sebelumnya dan
+    // menulis seluruh 27 ribu baris apa adanya.
+    const hashedColumns = updateColumns.filter((column) => !['dataAsOf', 'updatedAt', 'contentHash'].includes(column));
+    const previousRows = await prisma.warehouseStockSnapshot.findMany({
+      where: { date },
+      select: { id: true, sku: true, warehouseId: true, contentHash: true },
+    });
+    const previousById = new Map(previousRows.map((row) => [`${row.sku}:${row.warehouseId}`, row.id]));
+    const { changed } = selectChangedRows(persistable, {
+      columns: hashedColumns,
+      keyOf: (record) => `${record.sku}:${record.warehouseId}`,
+      previousHashes: new Map(previousRows.map((row) => [`${row.sku}:${row.warehouseId}`, row.contentHash])),
+    });
+
+    const statements = [];
+    for (let index = 0; index < changed.length; index += chunkSize) {
+      const chunk = changed.slice(index, index + chunkSize).map((record) => ({
+        ...record,
+        id: previousById.get(`${record.sku}:${record.warehouseId}`) || randomUUID(),
+        updatedAt,
+      }));
+      const placeholders = chunk.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ');
+      const values = chunk.flatMap((record) => columns.map((column) => record[column]));
+      const sql = `INSERT INTO "WarehouseStockSnapshot" (${columns.map((column) => `"${column}"`).join(', ')}) VALUES ${placeholders} ON CONFLICT("sku", "warehouseId", "date") DO UPDATE SET ${updateColumns.map((column) => `"${column}" = excluded."${column}"`).join(', ')}`;
+      const adapted = adaptSql(sql, values);
+      statements.push(prisma.$executeRawUnsafe(adapted.sql, ...adapted.params));
+    }
+
+    const touchSql = adaptSql(
+      'UPDATE "WarehouseStockSnapshot" SET "dataAsOf" = ?, "updatedAt" = ? WHERE "date" = ?',
+      [dataAsOf, updatedAt, date]
+    );
+    statements.push(prisma.$executeRawUnsafe(touchSql.sql, ...touchSql.params));
+
+    await prisma.$transaction(statements, { timeout: 180000 });
+    return persistable.length;
   }
 
   async syncShopee({ origin = 'MANUAL' } = {}) {
@@ -416,7 +484,7 @@ class SyncService {
       const syncStats = reconciliation.syncStats || null;
       const message = `PDC Gudang disinkronkan (${reconciliation.totalAudited} SKU-gudang) dengan ${reconciliation.discrepanciesCount} selisih stok terhadap Shopee.`;
       const auditMessage = syncStats
-        ? `${message} Stats: katalog=${syncStats.catalogProductCount || 0}, varian=${syncStats.variantCount || 0}, baris=${syncStats.persistedCandidateCount || snapshotCount}, unresolved=${syncStats.unresolvedVariantCount || 0}, gagal=${syncStats.failedVariantCount || 0}.`
+        ? `${message} Stats: katalog=${syncStats.catalogProductCount || 0}, varian=${syncStats.variantCount || 0}, baris=${syncStats.persistedCandidateCount || snapshotCount}, ditulis=${syncStats.writtenCount ?? '-'}${syncStats.fullWrite ? ' (tulis penuh)' : ''}, unresolved=${syncStats.unresolvedVariantCount || 0}, gagal=${syncStats.failedVariantCount || 0}.`
         : message;
       await this.writeLog('WAREHOUSE_SYNC', 'SUCCESS', auditMessage, timestamp);
       return {

@@ -75,6 +75,36 @@ syncAll()
 Tiap langkah menulis satu baris `SyncJobLog` (`jobType, status, message, timestamp`) —
 inilah yang mengisi `GET /api/sync/logs` dan panel "Aktivitas Sync" di dashboard.
 
+### Kenapa sync gudang cepat (dan apa harganya)
+
+Sync gudang menyentuh ~27.200 baris tiap kali jalan. Tiga hal yang membuatnya 14–15 detik,
+bukan belasan menit — semuanya hasil pengukuran terhadap Neon di Singapura, bukan tebakan:
+
+| Bagian | Cara | Terukur |
+|---|---|---|
+| Ambil data | `sku_list` massal berhalaman, konkurensi 12 (bukan satu permintaan per varian) | 27.300 permintaan → 28, ~5,7 dtk |
+| Tulis `WarehouseItem` | Hanya baris yang sidik jarinya berubah; `lastUpdated` disegarkan satu UPDATE menyeluruh | 12,8 → 2,4 dtk |
+| Tulis `WarehouseStockSnapshot` | Sama, kunci sudah memuat `date` | 4,0 → 1,9 dtk |
+
+Yang mahal ternyata **mengirim muatannya**, bukan kerja tulis di sisi server. Bukti: satu
+`UPDATE` menyeluruh atas 27.179 baris hanya 0,6–0,9 detik (satu parameter, tanpa muatan),
+sedangkan `ON CONFLICT ... WHERE IS DISTINCT FROM` — yang menghemat kerja indeks tapi tetap
+mengirim semua kolom — sama sekali tidak lebih cepat (7,2 dtk, 0 baris tersentuh). Karena
+itu strateginya bukan "menulis lebih pintar", melainkan "tidak mengirim yang sama".
+
+**Harganya, dan ini penting:** `contentHash` mencatat apa yang terakhir *kita tulis*, bukan
+isi baris sekarang. Baris yang diubah di luar sync tidak akan pernah diperbaiki jalur cepat
+— ini diuji langsung dengan merusak satu baris dan sync melewatinya. Penyeimbangnya: **sync
+pertama setiap hari menulis ulang semuanya**, jadi penyimpangan paling lama bertahan satu
+hari. Untuk memulihkan segera: jalankan sync dengan `WAREHOUSE_FORCE_FULL_WRITE=1`.
+
+Baris log `WAREHOUSE_SYNC` mencantumkan `ditulis=N` dan `(tulis penuh)` supaya terlihat sync
+mana yang benar-benar menulis.
+
+**Ubah konkurensi / ukuran halaman** → pemanggilan `fetchFromWarehouseApiBulk` di
+`warehouseService.getInventoryLevels`. **Ubah ukuran potongan tulis** →
+`WAREHOUSE_PERSIST_CHUNK_SIZE` (atap kerasnya 32.767 bind variable per statement).
+
 Cron (`src/cron/syncCron.js`) memanggil `syncAll({ origin: 'CRON' })` sesuai interval di
 Pengaturan (`5m|15m|30m|1h`, default `15m`). **Ubah pemetaan interval → cron expression** →
 `toCronExpression()` di file itu.

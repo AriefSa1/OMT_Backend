@@ -236,6 +236,9 @@ model WarehouseItem {
   rawProductId      Int?
   rawVariationId    Int?
   lastUpdated       DateTime @default(now())
+  // Sidik jari isi baris (lihat src/utils/rowHash.js). Sync hanya mengirim baris yang
+  // sidik jarinya berbeda; baris lama yang belum punya nilai ini ikut ditulis sekali.
+  contentHash       String?
 
   @@index([productType])
   @@index([teamId])
@@ -263,6 +266,8 @@ model WarehouseStockSnapshot {
   dataAsOf       DateTime @default(now())
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  // Sidik jari isi baris (lihat src/utils/rowHash.js), tujuannya sama seperti di WarehouseItem.
+  contentHash    String?
 
   @@unique([sku, warehouseId, date])
   @@index([date])
