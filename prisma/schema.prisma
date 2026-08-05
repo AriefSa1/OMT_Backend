@@ -285,6 +285,58 @@ model StockMovement {
   @@index([type])
 }
 
+/// A Shopee sellable unit, and the warehouse items it is assembled from.
+///
+/// Measured against the real catalog, a Shopee listing is a SET and a warehouse item is
+/// a COMPONENT: "3 In 1 Setelan | Blouse + Rok + Hijab" is sold as one listing but
+/// stocked as three separate SKUs. Name matching between the two sides returns zero
+/// results, so the relationship has to be recorded rather than inferred.
+///
+/// Mapping is anchored on the Shopee side because that list is finite - tens of
+/// listings, not the 26k warehouse SKUs, most of which are never sold individually.
+model ProductMapping {
+  id            String   @id @default(uuid())
+  storeId       String
+  shopeeItemId  String
+  /// Empty string means the mapping covers the whole listing rather than one variation.
+  /// A sentinel rather than null because SQLite treats nulls as distinct in a unique
+  /// index, so a nullable column here would let the same listing be mapped twice.
+  shopeeModelId String   @default("")
+  label         String   @default("")
+  /// Set false instead of deleting, so reconciliation history keeps its referent.
+  isActive      Boolean  @default(true)
+  notes         String?
+  mappedBy      String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  components ProductMappingComponent[]
+
+  @@unique([shopeeItemId, shopeeModelId])
+  @@index([storeId, isActive])
+}
+
+/// One warehouse SKU inside a set, and how many of it each sale consumes.
+///
+/// Sellable stock for the set is min(floor(component stock / quantityPerUnit)) across
+/// its components - the set runs out as soon as any one component does.
+model ProductMappingComponent {
+  id              String   @id @default(uuid())
+  mappingId       String
+  sku             String
+  /// 0 means "any warehouse", i.e. sum stock across all of them. A sentinel rather
+  /// than null for the same reason as shopeeModelId above - nulls would not collide,
+  /// so the same component could be added to a set repeatedly.
+  warehouseId     Int      @default(0)
+  quantityPerUnit Int      @default(1)
+  createdAt       DateTime @default(now())
+
+  mapping ProductMapping @relation(fields: [mappingId], references: [id], onDelete: Cascade)
+
+  @@unique([mappingId, sku, warehouseId])
+  @@index([sku])
+}
+
 model StockReconciliation {
   id             String   @id @default(uuid())
   sku            String
