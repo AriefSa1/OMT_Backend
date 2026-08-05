@@ -19,7 +19,26 @@ function normalise(value) {
   return String(value || '').trim().toUpperCase();
 }
 
+/**
+ * The client is generated to a non-standard path (see `generator client` in
+ * schema.prisma), so it does not regenerate on its own after a schema change. Without
+ * this check the failure surfaces as `Cannot read properties of undefined`.
+ */
+function assertReady() {
+  if (!prisma.shopeeListingVariation) {
+    console.error('Prisma Client belum mengenal model ShopeeListingVariation.');
+    console.error('Jalankan:  npx prisma generate');
+    return false;
+  }
+  return true;
+}
+
 async function main() {
+  if (!assertReady()) {
+    process.exitCode = 1;
+    return;
+  }
+
   const [variations, products, warehouseSkus] = await Promise.all([
     prisma.shopeeListingVariation.findMany({
       select: { shopeeItemId: true, shopeeModelId: true, variationSku: true, name: true, stock: true },
@@ -82,7 +101,12 @@ async function main() {
 
 main()
   .catch((error) => {
-    console.error('Gagal:', error.message);
+    if (/does not exist in the current database|no such table/i.test(error.message || '')) {
+      console.error('Tabel ShopeeListingVariation belum ada di database ini.');
+      console.error('Terapkan migrasinya - lihat prisma/migrations/README.md');
+    } else {
+      console.error('Gagal:', error.message);
+    }
     process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());

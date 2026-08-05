@@ -238,7 +238,17 @@ class ShopeeService {
       )
     );
 
-    await this.persistProductVariations(storeId, products);
+    // Supplementary to the product rows above, so a failure here must not take the
+    // catalog sync down with it. The usual causes are operational rather than data
+    // problems: a Prisma Client generated before this model existed, or a database the
+    // migration has not been applied to yet.
+    await this.persistProductVariations(storeId, products).catch((err) => {
+      console.warn(
+        '[Shopee Service] Variation persistence skipped, products still saved:',
+        err.message,
+        '- run `npx prisma generate` and `npx prisma migrate deploy` (see prisma/migrations/README.md)'
+      );
+    });
   }
 
   /**
@@ -250,6 +260,10 @@ class ShopeeService {
    * real SKU sits at variation level.
    */
   async persistProductVariations(storeId, products) {
+    if (!prisma.shopeeListingVariation) {
+      throw new Error('Prisma Client has no ShopeeListingVariation model');
+    }
+
     const dataAsOf = new Date();
 
     for (const product of products) {

@@ -72,6 +72,18 @@ replica:
 Production is presumably ahead of this backup (syncs succeed there, and they require
 `SyncRunLock`), but that has not been verified against the live database.
 
+## Regenerate the client after every schema change
+
+`generator client` in `schema.prisma` writes to `node_modules/.prisma/client-active`,
+a non-standard path. Nothing regenerates it automatically, so a client built before a
+model existed will report that model as `undefined` at runtime.
+
+```bash
+npx prisma generate
+```
+
+Run this after pulling any change to `schema.prisma`, and after applying migrations.
+
 ## From here on
 
 Use `npm run prisma:migrate:deploy`. Do not use `db push` on any database holding data.
@@ -79,4 +91,5 @@ Use `npm run prisma:migrate:deploy`. Do not use `db push` on any database holdin
 ```bash
 npx prisma migrate dev --name describe_the_change   # development
 npm run prisma:migrate:deploy                       # production
+npx prisma generate                                 # always, after either
 ```
