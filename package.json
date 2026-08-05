@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "npx prisma generate && npx prisma migrate deploy",
+    "build": "npx prisma generate && npx prisma db push --accept-data-loss",
     "prisma:generate": "prisma generate",
-    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:db:push": "prisma db push",
     "prisma:migrate:dev": "prisma migrate dev",
     "test:ai": "node test-ai-suite.js",
     "docs": "node docs/index.js",

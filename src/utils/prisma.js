@@ -4,10 +4,10 @@ if (!process.env.DATABASE_URL) {
 
 let PrismaClient;
 try {
-  PrismaClient = require('../../node_modules/.prisma/client-active').PrismaClient;
+  PrismaClient = require('@prisma/client').PrismaClient;
 } catch {
   try {
-    PrismaClient = require('@prisma/client').PrismaClient;
+    PrismaClient = require('../../node_modules/.prisma/client-active').PrismaClient;
   } catch {
     throw new Error('Prisma Client tidak ditemukan. Jalankan "npx prisma generate".');
   }

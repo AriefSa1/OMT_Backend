@@ -1,12 +1,11 @@
 // Prisma Schema for Internal Marketplace & Warehouse Analytics
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 generator client {
   provider = "prisma-client-js"
-  output   = "../node_modules/.prisma/client-active"
 }
 
 model User {
