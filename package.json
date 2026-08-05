@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "node server.js",
     "prisma:generate": "prisma generate",
-    "prisma:db:push": "prisma db push"
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:dev": "prisma migrate dev"
   },
   "dependencies": {
     "@google/genai": "^2.15.0",
