@@ -281,11 +281,19 @@ class SyncService {
       const metricCount = intelligence.source === 'SHOPEE_API'
         ? await this.persistProductMetrics(metrics.storeId, intelligence.productPerformance)
         : 0;
-      const message = metricCount
+      // Secondary to the catalog, so its failure must not fail the job (constraint 9).
+      const orderSummary = await shopeeService.syncOrderSummaryHistory({ days: 30 }).catch((err) => {
+        console.warn('[Sync] Order summary history unavailable:', err.message);
+        return { source: 'EMPTY', persisted: 0, message: err.message };
+      });
+      const orderPart = orderSummary.persisted
+        ? ` ${orderSummary.persisted} hari ringkasan pesanan tersimpan.`
+        : ` Ringkasan pesanan belum tersimpan: ${orderSummary.message || 'sumber tidak tersedia.'}`;
+      const message = (metricCount
         ? `Katalog disinkronkan bersama ${metricCount} snapshot performa produk.`
-        : 'Katalog disinkronkan. Snapshot performa produk belum tersedia dari Seller Center.';
+        : 'Katalog disinkronkan. Snapshot performa produk belum tersedia dari Seller Center.') + orderPart;
       await this.writeLog('SHOPEE_SYNC', intelligence.source === 'SHOPEE_API' ? 'SUCCESS' : 'DEGRADED', message, timestamp);
-      return { success: true, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, origin };
+      return { success: true, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, orderSummaryDays: orderSummary.persisted, origin };
     } catch (err) {
       await this.writeLog('SHOPEE_SYNC', 'FAILED', err.message, timestamp);
       return { success: false, source: 'Shopee', status: 'Gagal', message: 'Sinkronisasi Shopee gagal.', origin };

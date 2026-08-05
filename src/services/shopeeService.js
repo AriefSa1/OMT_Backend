@@ -7,6 +7,10 @@ let activeCookie = '';
 let cachedNormalizedProducts = [];
 const SHOPEE_HOMEPAGE_ADS_ENDPOINT = 'https://seller.shopee.co.id/api/pas/v1/homepage/query/';
 const SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v4/product/performance/';
+// endpoint_shopee.json -> datacenter_key_metrics. Seller Center's own dashboard endpoint;
+// each metric arrives as one { timestamp, value } point per day, so a single call carries
+// the whole history rather than only today.
+const SHOPEE_KEY_METRICS_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v3/dashboard/key-metrics/';
 const ADS_AMOUNT_DIVISOR = 100000;
 const SHOPEE_ORDER_BY = {
   'confirmed_sales.desc': 'confirmed_sales.desc',
@@ -342,6 +346,127 @@ class ShopeeService {
 
     if (!Number.isFinite(gmv) || !Number.isFinite(orderCount)) return null;
     return { todayGmv: gmv, todayOrders: orderCount, conversionRate, averageOrderValue };
+  }
+
+  /**
+   * Daily order summary straight from Seller Center's own dashboard endpoint, which
+   * removes the need for the separately configured `shopeeOrderSummaryUrl`.
+   *
+   * Two properties make it usable as history: every metric carries one point per day, so
+   * a single call backfills the whole window, and the running day is not included — no
+   * row here is a partial figure.
+   *
+   * The `confirmed_*` series is used because every other surface in this app reports
+   * confirmed orders; mixing in `paid_*` would make the dashboard disagree with itself.
+   */
+  async fetchOrderSummaryHistory({ days = 30, cookie: customCookie = '' } = {}) {
+    const session = await this.getActiveSession();
+    const cookie = customCookie || activeCookie || session?.cookieString || '';
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', rows: [], message: 'Simpan cookie Shopee yang valid di Pengaturan sebelum mengambil ringkasan pesanan.' };
+    }
+
+    const safeDays = Math.min(30, Math.max(1, Number(days) || 30));
+    const endTime = Math.floor(Date.now() / 1000);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(endTime - safeDays * 86400),
+      end_time: String(endTime),
+      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      fetag: 'datacenter_overview',
+    });
+
+    try {
+      const response = await axios.get(`${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`, {
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data || {};
+      if (payload.code !== 0 || !payload.result) {
+        return { source: 'EMPTY', rows: [], message: `Seller Center menolak permintaan ringkasan pesanan${payload.msg ? `: ${payload.msg}` : '.'}` };
+      }
+      const rows = this.normalizeKeyMetricSeries(payload.result);
+      return {
+        source: 'SHOPEE_API',
+        rows,
+        message: rows.length ? null : 'Seller Center tidak mengembalikan titik data harian untuk rentang ini.',
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        rows: [],
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini untuk ringkasan pesanan. Perbarui cookie di Pengaturan.'
+          : status
+            ? `Ringkasan pesanan Seller Center mengembalikan HTTP ${status}.`
+            : err.message,
+      };
+    }
+  }
+
+  normalizeKeyMetricSeries(result) {
+    const byDate = new Map();
+    const collect = (key, field) => {
+      const points = Array.isArray(result?.[key]?.points) ? result[key].points : [];
+      for (const point of points) {
+        const timestamp = Number(point?.timestamp);
+        if (!Number.isFinite(timestamp)) continue;
+        const date = getJakartaDateKey(new Date(timestamp * 1000));
+        const row = byDate.get(date) || { date };
+        row[field] = asFiniteNumber(point.value);
+        byDate.set(date, row);
+      }
+    };
+    collect('confirmed_gmv', 'gmv');
+    collect('confirmed_orders', 'orderCount');
+    collect('confirmed_sales_per_order', 'averageOrderValue');
+    collect('shop_uv_to_confirmed_buyers_rate', 'conversionRate');
+
+    return [...byDate.values()]
+      .filter((row) => row.gmv !== undefined || row.orderCount !== undefined)
+      .map((row) => ({
+        date: row.date,
+        gmv: asFiniteNumber(row.gmv),
+        orderCount: Math.round(asFiniteNumber(row.orderCount)),
+        // Shopee sends the rate as a fraction. It is stored as received and normalised on
+        // read, the same way the ads snapshot handles its rates.
+        conversionRate: asFiniteNumber(row.conversionRate),
+        averageOrderValue: asFiniteNumber(row.averageOrderValue),
+      }))
+      .sort((left, right) => left.date.localeCompare(right.date));
+  }
+
+  async persistOrderSummaryHistory(storeId, rows = []) {
+    if (!storeId || !rows.length) return 0;
+    let written = 0;
+    for (const row of rows) {
+      const data = {
+        gmv: row.gmv,
+        orderCount: row.orderCount,
+        conversionRate: row.conversionRate,
+        averageOrderValue: row.averageOrderValue,
+      };
+      await prisma.shopeeOrderSummary.upsert({
+        where: { storeId_date: { storeId, date: row.date } },
+        update: data,
+        create: { storeId, date: row.date, ...data },
+      });
+      written += 1;
+    }
+    return written;
+  }
+
+  async syncOrderSummaryHistory({ days = 30 } = {}) {
+    const session = await this.getActiveSession();
+    if (!session?.storeId) {
+      return { source: 'EMPTY', persisted: 0, message: 'Tidak ada sesi toko aktif untuk menyimpan ringkasan pesanan.' };
+    }
+    const result = await this.fetchOrderSummaryHistory({ days });
+    const persisted = await this.persistOrderSummaryHistory(session.storeId, result.rows);
+    return { source: result.source, persisted, message: result.message };
   }
 
   async fetchLiveShopeeMetrics(customCookie = '') {

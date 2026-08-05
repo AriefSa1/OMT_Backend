@@ -960,7 +960,7 @@ class SnapshotService {
       reconciliationTrust: warehouse.reconciliationTrust,
       history: {
         orderAvailable: Boolean(latestOrder),
-        message: latestOrder ? null : 'Data GMV dan pesanan belum tersedia karena endpoint ringkasan pesanan belum terhubung.',
+        message: latestOrder ? null : 'Belum ada ringkasan pesanan harian tersimpan. Jalankan Sync untuk mengambil ringkasan dari Seller Center.',
       },
       salesTrend,
       categorySales,

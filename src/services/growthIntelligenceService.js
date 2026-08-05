@@ -59,7 +59,7 @@ class GrowthIntelligenceService {
         gmv: weeklyRows.length ? weeklyGmv : null,
         orders: weeklyRows.length ? weeklyOrders : null,
         averageOrderValue: weeklyOrders ? weeklyGmv / weeklyOrders : null,
-        message: weeklyRows.length ? null : 'Data GMV dan pesanan belum tersedia dari endpoint ringkasan pesanan.',
+        message: weeklyRows.length ? null : 'Belum ada ringkasan pesanan harian tersimpan. Jalankan Sync untuk mengambil ringkasan dari Seller Center.',
       },
       taskBoard: actions.tasks,
       competitorMonitor: {
