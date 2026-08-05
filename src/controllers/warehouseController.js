@@ -14,6 +14,8 @@ async function getInventory(req, res) {
       totalAvailableUnits: snapshot.totals.totalAvailableUnits,
       totalValuation: snapshot.totals.totalValuation,
       totals: snapshot.totals,
+      // Without this the page cannot tell "no discrepancy" from "not computable".
+      reconciliationTrust: snapshot.reconciliationTrust,
       counts: snapshot.counts,
       filters: snapshot.filters,
       pagination: snapshot.pagination,
@@ -88,6 +90,13 @@ async function getReconciliation(req, res) {
   }
 }
 
+async function getTeamOverview(req, res) {
+  // Read straight from the warehouse rather than a snapshot: it is a single fast call and
+  // the figures are only meaningful as of now. An outage is reported, not hidden.
+  const overview = await warehouseService.getTeamInventoryOverview();
+  return res.json({ success: overview.source === 'WAREHOUSE_API', ...overview });
+}
+
 async function triggerWarehouseSync(req, res) {
   const result = await syncService.syncWarehouse({ origin: 'MANUAL' });
   return res.status(result.success ? 200 : 502).json(result);
@@ -98,5 +107,6 @@ module.exports = wrapHandlers({
   getProductDetail,
   getProductHistory,
   getReconciliation,
+  getTeamOverview,
   triggerWarehouseSync,
 });

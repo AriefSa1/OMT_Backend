@@ -1457,6 +1457,94 @@ class WarehouseService {
     }
   }
 
+  /**
+   * The signed-in account's own team. The login response does not carry it reliably, but
+   * /v1/users/info does, and the inventory overview refuses to answer without a team_id.
+   */
+  async fetchWarehouseUserContext() {
+    let origin = 'https://pdcgudang.et.r.appspot.com';
+    try {
+      origin = new URL(this.inventoryUrl || this.loginUrl || origin).origin;
+    } catch {
+      // keep the default origin
+    }
+    const payload = await this.fetchAuthenticatedData(`${origin}/v1/users/info`);
+    const info = payload?.data || {};
+    return {
+      origin,
+      username: info.username || '',
+      teamId: info.user_team?.team_id ?? null,
+      teamName: info.user_team?.team?.name || '',
+      teamCode: info.user_team?.team?.team_code || '',
+    };
+  }
+
+  /**
+   * Inventory KPIs for the signed-in team, from
+   * warehouse_endpoint.json -> /v1/invertories/dashboard/overview.
+   *
+   * Scope matters and travels with the numbers: this covers one team, while the local
+   * warehouse snapshot spans every team the account can see.
+   */
+  async getTeamInventoryOverview() {
+    if (!this.isLoginConfigured()) {
+      return { source: 'UNAVAILABLE', message: 'Koneksi gudang belum dikonfigurasi di Pengaturan.', data: null };
+    }
+    try {
+      const context = await this.fetchWarehouseUserContext();
+      if (!context.teamId) {
+        return { source: 'UNAVAILABLE', message: 'Akun gudang ini tidak terikat pada tim mana pun, sehingga ringkasan inventori tidak dapat diambil.', data: null };
+      }
+      const payload = await this.fetchAuthenticatedData(
+        `${context.origin}/v1/invertories/dashboard/overview?team_id=${encodeURIComponent(context.teamId)}`
+      );
+      const body = payload?.data || {};
+      const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : null);
+      const ongoingRows = Array.isArray(body.product_ongoing) ? body.product_ongoing : [];
+
+      return {
+        source: 'WAREHOUSE_API',
+        dataAsOf: new Date().toISOString(),
+        message: null,
+        data: {
+          team: { id: context.teamId, name: context.teamName, code: context.teamCode },
+          products: {
+            productCount: num(body.product?.product_count),
+            skuCount: num(body.product?.sku_count),
+            bundleCount: num(body.product?.bundle_count),
+          },
+          ready: body.product_ready ? {
+            stock: num(body.product_ready.stock),
+            skuCount: num(body.product_ready.sku_count),
+            assetsTotal: num(body.product_ready.assets_total),
+          } : null,
+          // Only the categories the warehouse actually reported. An absent category is not
+          // claimed to be zero in either direction.
+          ongoing: ongoingRows.map((row) => ({
+            type: String(row.type || '').toLowerCase(),
+            stock: num(row.stock),
+            skuCount: num(row.sku_count),
+            assetsTotal: num(row.assets_total),
+          })),
+          invoice: body.invoice ? { count: num(body.invoice.invoice_count), total: num(body.invoice.invoice_total) } : null,
+          invoiceFromOtherTeam: body.invoice_from_other_team
+            ? { count: num(body.invoice_from_other_team.invoice_count), total: num(body.invoice_from_other_team.invoice_total) }
+            : null,
+          orderCount: num(body.order?.count),
+        },
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'UNAVAILABLE',
+        data: null,
+        message: status === 403 || status === 500
+          ? 'Akun gudang ini tidak memiliki izin membaca ringkasan inventori tim.'
+          : `Ringkasan inventori tim tidak dapat diambil${status ? ` (HTTP ${status})` : ''}.`,
+      };
+    }
+  }
+
   normalizeStockFlowRow(row, sku, index) {
     const count = Number(row?.count) || 0;
     const flowType = String(row?.type || '').toLowerCase();
