@@ -1,0 +1,869 @@
+{
+  "project": "Shopee HTTP Endpoints Documentation",
+  "last_updated": "2026-08-05",
+  "authentication": {
+    "required_cookies": [
+      "SPC_CDS",
+      "SPC_CDS_VER",
+      "SPC_EC_TK",
+      "SPC_ST",
+      "SPC_T_ID",
+      "SPC_U"
+    ],
+    "default_headers": {
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+      "x-region": "id",
+      "x-lang": "id",
+      "referer": "https://seller.shopee.co.id/"
+    }
+  },
+  "endpoints": [
+    {
+      "id": "datacenter_key_metrics",
+      "name": "Dashboard Key Metrics",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v3/dashboard/key-metrics/",
+      "description": "Mengambil ringkasan metrik performa utama toko (Total Penjualan, Pesanan, Tingkat Konversi, Total Pengunjung, dan Halaman Dilihat).",
+      "search_params": {
+        "start_time": {
+          "type": "integer (unix timestamp)",
+          "description": "Waktu awal filter data dalam detik",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer (unix timestamp)",
+          "description": "Waktu akhir filter data dalam detik",
+          "example": 1722729600
+        },
+        "period": {
+          "type": "string",
+          "enum": ["past30days", "past7days", "realtime", "month"],
+          "description": "Rentang periode data analitik",
+          "example": "past30days"
+        },
+        "fetag": {
+          "type": "string",
+          "description": "Frontend tracking tag",
+          "example": "datacenter_overview"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_order_performance",
+      "name": "Dashboard Order Performance Chart",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/dashboard/order-performance/",
+      "description": "Grafik tren histori performa pesanan dan pendapatan harian/mingguan toko.",
+      "search_params": {
+        "start_time": {
+          "type": "integer",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer",
+          "example": 1722729600
+        },
+        "period": {
+          "type": "string",
+          "enum": ["past30days", "past7days", "realtime", "month"],
+          "example": "past30days"
+        },
+        "order_type": {
+          "type": "string",
+          "enum": ["confirmed", "placed", "paid"],
+          "description": "Tipe status pesanan yang dihitung",
+          "example": "confirmed"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_product_rankings",
+      "name": "Top Product Rankings",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v3/dashboard/product-rankings/",
+      "description": "Mengambil peringkat produk teratas berdasarkan nilai penjualan, jumlah unit terjual, atau kunjungan.",
+      "search_params": {
+        "start_time": {
+          "type": "integer",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer",
+          "example": 1722729600
+        },
+        "category_type": {
+          "type": "string",
+          "example": "all"
+        },
+        "category_id": {
+          "type": "integer",
+          "example": 0
+        },
+        "page_size": {
+          "type": "integer",
+          "example": 10
+        },
+        "page_num": {
+          "type": "integer",
+          "example": 1
+        },
+        "order_type": {
+          "type": "string",
+          "enum": ["confirmed", "placed"],
+          "example": "confirmed"
+        },
+        "order_by": {
+          "type": "string",
+          "enum": ["sales", "units", "page_views", "conversion_rate"],
+          "example": "sales"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_traffic_sources",
+      "name": "Traffic Sources Breakdown",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v1/dashboard/traffic-sources/",
+      "description": "Breakdown asal sumber pengunjung toko (Pencarian Shopee, Feed/Live, Iklan Shopee, Rekomendasi, Eksternal).",
+      "search_params": {
+        "start_time": {
+          "type": "integer",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer",
+          "example": 1722729600
+        },
+        "period": {
+          "type": "string",
+          "example": "past30days"
+        },
+        "order_type": {
+          "type": "string",
+          "example": "confirmed"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_traffic_product_contribution",
+      "name": "Traffic Product Contribution",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v1/dashboard/traffic-sources/product-contribution/",
+      "description": "Melihat kontribusi traffic spesifik per produk pada kanal tertentu.",
+      "search_params": {
+        "start_time": {
+          "type": "integer",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer",
+          "example": 1722729600
+        },
+        "l1_source": {
+          "type": "string",
+          "description": "Level 1 traffic source identifier",
+          "example": "search"
+        },
+        "product_num": {
+          "type": "integer",
+          "example": 10
+        },
+        "page_size": {
+          "type": "integer",
+          "example": 10
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_campaign_realtime_metrics",
+      "name": "Campaign Board Realtime Metrics",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v2/campaign_board/realtime_metrics/",
+      "description": "Metrik kampanye dan promosi secara real-time pada event tertentu.",
+      "search_params": {
+        "event": {
+          "type": "string",
+          "example": "confirmed"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_product_performance",
+      "name": "Product Performance Table",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/v4/product/performance/",
+      "description": "Tabel komprehensif performa katalog produk toko dalam rentang waktu yang dipilih.",
+      "search_params": {
+        "start_time": {
+          "type": "integer",
+          "example": 1720137600
+        },
+        "end_time": {
+          "type": "integer",
+          "example": 1722729600
+        },
+        "period": {
+          "type": "string",
+          "example": "past30days"
+        },
+        "keyword": {
+          "type": "string",
+          "description": "Filter pencarian nama produk",
+          "example": ""
+        },
+        "order_by": {
+          "type": "string",
+          "example": "sales_desc"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_category_tree",
+      "name": "Global Category Tree",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/category/global/tree/",
+      "description": "Mengambil struktur pohon hierarki kategori Shopee untuk analitik kategori.",
+      "search_params": {
+        "include_category_with_item": {
+          "type": "boolean",
+          "example": true
+        },
+        "include_level": {
+          "type": "integer",
+          "example": 3
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "datacenter_config_batch",
+      "name": "Data Center Batch Configuration",
+      "category": "Bisnis Saya - Datacenter",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mydata/config/batch/",
+      "description": "Mengambil konfigurasi sistem analitik data seller.",
+      "search_params": {
+        "keys": {
+          "type": "string",
+          "example": "conf.ads,conf.data_ready_state,conf.cbc,conf.video_support_region"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_search_list",
+      "name": "Search & Filter Product List",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/mpsku/list/v2/search_product_list",
+      "description": "Mengambil daftar katalog produk toko lengkap beserta harga, stok, variasi SKU, gambar, dan status iklan.",
+      "search_params": {
+        "page_size": {
+          "type": "integer",
+          "example": 24
+        },
+        "page_number": {
+          "type": "integer",
+          "example": 1
+        },
+        "list_type": {
+          "type": "string",
+          "enum": ["live_all", "delisted", "banned", "reviewing", "sold_out", "unlisted"],
+          "example": "live_all"
+        },
+        "keyword": {
+          "type": "string",
+          "example": ""
+        },
+        "operation_sort_by": {
+          "type": "string",
+          "example": "update_time_desc"
+        },
+        "need_ads": {
+          "type": "boolean",
+          "example": true
+        },
+        "SPC_CDS": {
+          "type": "string",
+          "description": "Session token identifier",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_list_count",
+      "name": "Product Count per Tab Status",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/mpsku/list/v2/get_list_count",
+      "description": "Mengambil jumlah total produk yang ada di masing-masing tab status (Live, Habis, Diblokir, Diarsipkan, dll).",
+      "search_params": {
+        "list_types": {
+          "type": "string (comma-separated)",
+          "example": "all,live_all,restock,banned,deleted,draft,unlisted"
+        },
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_extensive_info",
+      "name": "Get Product Extensive Info",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/mpsku/list/v2/get_product_extensive_info",
+      "description": "Mengambil status ekstensif produk seperti harga garansi, status AMS (Affiliate), dan potensi iklan.",
+      "search_params": {
+        "product_ids": {
+          "type": "string (comma-separated IDs)",
+          "example": "24912389102,28412894121"
+        },
+        "bidding_price": {
+          "type": "boolean",
+          "example": true
+        },
+        "ams": {
+          "type": "boolean",
+          "example": true
+        },
+        "ads_potential": {
+          "type": "boolean",
+          "example": true
+        },
+        "standard_product_eligible": {
+          "type": "boolean",
+          "example": true
+        },
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_performance_info",
+      "name": "Get Product Performance Statistics",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/mpsku/list/v2/get_product_performance_info",
+      "description": "Statistik performa real-time dan histori untuk ID produk yang ditentukan.",
+      "search_params": {
+        "product_ids": {
+          "type": "string (comma-separated IDs)",
+          "example": "24912389102,28412894121"
+        },
+        "need_trend": {
+          "type": "boolean",
+          "example": true
+        },
+        "need_growth_rate": {
+          "type": "boolean",
+          "example": true
+        },
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_boost_info",
+      "name": "Product Boost Status",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/mpsku/list/get_boost_info",
+      "description": "Memeriksa slot fitur 'Naikkan Produk' (Boost) dan waktu cooldown.",
+      "search_params": {
+        "product_id_list": {
+          "type": "string (comma-separated IDs)",
+          "example": "24912389102"
+        },
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_campaign_info",
+      "name": "Get Campaign Info by Item List",
+      "category": "Manajemen Produk",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/opt/product/get_campaign_info_by_item_list/",
+      "description": "Mengambil informasi promo atau flash sale campaign yang diikuti oleh produk.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {
+        "item_id_list": [
+          24912389102,
+          28412894121
+        ]
+      }
+    },
+    {
+      "id": "product_category_tree_listing",
+      "name": "Category Tree for Product Listing",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/category/get_category_tree/",
+      "description": "Pohon kategori produk untuk keperluan input/edit produk di Seller Centre.",
+      "search_params": {
+        "include_level": {
+          "type": "integer",
+          "example": 5
+        },
+        "version": {
+          "type": "string",
+          "example": "3.1.0"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "product_constraints",
+      "name": "Get Product Constraints & Attributes",
+      "category": "Manajemen Produk",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/product/get_product_constraints/",
+      "description": "Batasan validasi panjang karakter judul, deskripsi, dimensi, dan aturan merek.",
+      "search_params": {
+        "version": {
+          "type": "string",
+          "example": "3.1.0"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "seller_shop_info",
+      "name": "Get Shop Info",
+      "category": "Akun & Toko",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/selleraccount/shop_info/",
+      "description": "Informasi profil toko (Shop ID, nama toko, domain, status verifikasi).",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "seller_user_info",
+      "name": "Get Logged In User Info",
+      "category": "Akun & Toko",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/selleraccount/user_info/",
+      "description": "Informasi user / operator toko yang sedang aktif login.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "account_health_overview",
+      "name": "Account Health Overview",
+      "category": "Akun & Toko",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/accounthealth/v1/sc/shops/overview",
+      "description": "Kesehatan Toko: status penalti poin, tingkat keterlambatan kirim, persentase pesanan batal, respon chat.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "shop_label_badge",
+      "name": "Get Shop Label Badge",
+      "category": "Akun & Toko",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/sellermisc/header/get_shop_label/",
+      "description": "Label badge toko resmi (Star Seller, Star Plus, Shopee Mall, Official Store).",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {}
+    },
+    {
+      "id": "homepage_todo_summary",
+      "name": "Homepage To-Do List Summary",
+      "category": "Akun & Toko",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/miscellaneous/homepage/get_to_do_list_summary/",
+      "description": "Daftar to-do list penting toko (Perlu Dikirim, Dibatalkan, Menunggu Pembayaran, Komplain Pengembalian).",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "notification_unread_count",
+      "name": "Seller Notification Unread Count",
+      "category": "Akun & Toko",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v2/notification/unread_count",
+      "description": "Menghitung notifikasi toko yang belum dibaca.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "shopee_ads_meta",
+      "name": "Shopee Ads Metadata & Balance",
+      "category": "Iklan & Pemasaran",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/pas/v1/sc_pc_homepage/get_meta/",
+      "description": "Informasi saldo Saldo Iklan Shopee (Shopee Ads balance), status akun iklan, dan rekomendasi campaign.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {}
+    },
+    {
+      "id": "shopee_ads_product_roi",
+      "name": "Ads Estimated Simple ROI Data",
+      "category": "Iklan & Pemasaran",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/pas/v1/product/list_estimated_simple_roi_two_data/",
+      "description": "Kalkulasi proyeksi ROI iklan untuk produk-produk yang ditargetkan.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {
+        "item_id_list": [
+          24912389102,
+          28412894121
+        ]
+      }
+    },
+    {
+      "id": "mkt_bidding_settings",
+      "name": "Price Guarantee Bidding Settings",
+      "category": "Iklan & Pemasaran",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mkt/bidding/get_shop_settings",
+      "description": "Pengaturan program Garansi Harga Terbaik (Realtime Bidding).",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {}
+    },
+    {
+      "id": "mkt_campaign_list",
+      "name": "Landing Page Campaign List",
+      "category": "Iklan & Pemasaran",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/mkt/cmt/get_landing_page_campaign_list",
+      "description": "Daftar event kampanye promosi dan tanggal batas pendaftaran untuk toko.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {
+        "page_no": 1,
+        "page_size": 20,
+        "tab_type": 1
+      }
+    },
+    {
+      "id": "affiliate_ams_graphql",
+      "name": "Affiliate Marketing Solution GraphQL API",
+      "category": "Iklan & Pemasaran",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/api/v3/affiliateplatform/gql",
+      "description": "Endpoint GraphQL modul Affiliate Marketing Solution (AMS) untuk komisi afiliasi penjual.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": {
+        "operationName": "GetHomepageWidgetQuery",
+        "variables": {
+          "shopId": 123456789
+        },
+        "query": "query GetHomepageWidgetQuery($shopId: Int!) { amsShop(shopId: $shopId) { status balance commissionRate } }"
+      }
+    },
+    {
+      "id": "open_platform_check_login",
+      "name": "Check Login Developer Console",
+      "category": "Shopee Open Platform",
+      "method": "GET",
+      "base_url": "https://open.shopee.com",
+      "path": "/opservice/api/v1/check/login",
+      "description": "Memeriksa status sesi login di Shopee Open Platform Developer Console.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "open_platform_task_center",
+      "name": "Developer Task Center Overview",
+      "category": "Shopee Open Platform",
+      "method": "GET",
+      "base_url": "https://open.shopee.com",
+      "path": "/opservice/api/v1/task_center/overview",
+      "description": "Ringkasan status integrasi aplikasi Open Platform, review approval, dan sandbox.",
+      "search_params": {
+        "SPC_CDS": {
+          "type": "string",
+          "example": "b4e23180-994c-45eb-8968-07b98d9e2b10"
+        },
+        "SPC_CDS_VER": {
+          "type": "string",
+          "example": "2"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "open_platform_alerts",
+      "name": "Developer Alert & Maintenance List",
+      "category": "Shopee Open Platform",
+      "method": "GET",
+      "base_url": "https://open.shopee.com",
+      "path": "/opservice/api/v1/alert/list",
+      "description": "Peringatan perubahan spesifikasi API Open Platform atau jadwal maintenance sistem.",
+      "search_params": {
+        "page_size": {
+          "type": "integer",
+          "example": 10
+        },
+        "page_num": {
+          "type": "integer",
+          "example": 1
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "webchat_login_sc",
+      "name": "Webchat Seller Centre Login",
+      "category": "Shopee Webchat",
+      "method": "POST",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/webchat/api/coreapi/v1.2/mini/login/sc",
+      "description": "Autentikasi sesi token Shopee Webchat untuk seller.",
+      "search_params": {
+        "source": {
+          "type": "string",
+          "example": "sc"
+        }
+      },
+      "request_payload": {
+        "csrf_token": "a1b2c3d4e5f6g7h8"
+      }
+    },
+    {
+      "id": "webchat_unread_count",
+      "name": "Webchat Unread Count",
+      "category": "Shopee Webchat",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/webchat/api/v1.2/mini/conversation/unread-count",
+      "description": "Jumlah chat pembeli yang belum dibalas atau belum dibaca.",
+      "search_params": {
+        "biz_id": {
+          "type": "string",
+          "example": "1"
+        },
+        "_uid": {
+          "type": "string",
+          "example": "123456789"
+        },
+        "csrf_token": {
+          "type": "string",
+          "example": "a1b2c3d4e5f6g7h8"
+        }
+      },
+      "request_payload": null
+    },
+    {
+      "id": "webchat_shop_setting",
+      "name": "Webchat Shop Setting & Auto-Reply",
+      "category": "Shopee Webchat",
+      "method": "GET",
+      "base_url": "https://seller.shopee.co.id",
+      "path": "/webchat/api/workbenchapi/v1.2/mini/shop/setting",
+      "description": "Pengaturan balasan otomatis (auto-reply), FAQ bot, dan jam operasional chat toko.",
+      "search_params": {
+        "shop_id": {
+          "type": "integer",
+          "example": 123456789
+        },
+        "_uid": {
+          "type": "string",
+          "example": "123456789"
+        },
+        "csrf_token": {
+          "type": "string",
+          "example": "a1b2c3d4e5f6g7h8"
+        }
+      },
+      "request_payload": null
+    }
+  ]
+}

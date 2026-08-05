@@ -76,10 +76,60 @@ function getJakartaDayRange() {
     timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-  // Homepage Ads accepts a complete Jakarta calendar day, not a partial live range.
   const currentDayStart = Math.floor(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), -7, 0, 0) / 1000);
-  const startTime = currentDayStart - (24 * 60 * 60);
-  return { startTime, endTime: currentDayStart - 1 };
+  return { startTime: currentDayStart, endTime: currentDayStart + (24 * 60 * 60) - 1 };
+}
+
+function getAdsTimeRange(period = 'real_time', customStart = null, customEnd = null) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  const currentDayStart = Math.floor(Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), -7, 0, 0) / 1000);
+  const currentDayEnd = currentDayStart + 86400 - 1;
+  const ONE_DAY = 86400;
+
+  if (customStart && customEnd) {
+    return {
+      period: 'custom',
+      startTime: Number(customStart),
+      endTime: Number(customEnd),
+    };
+  }
+
+  switch (period) {
+    case 'real_time':
+    case 'today':
+      return {
+        period: 'real_time',
+        startTime: currentDayStart,
+        endTime: currentDayEnd,
+      };
+    case 'yesterday':
+      return {
+        period: 'yesterday',
+        startTime: currentDayStart - ONE_DAY,
+        endTime: currentDayStart - 1,
+      };
+    case 'past7days':
+      return {
+        period: 'past7days',
+        startTime: currentDayStart - (7 * ONE_DAY),
+        endTime: currentDayEnd,
+      };
+    case 'past30days':
+      return {
+        period: 'past30days',
+        startTime: currentDayStart - (30 * ONE_DAY),
+        endTime: currentDayEnd,
+      };
+    default:
+      return {
+        period: 'real_time',
+        startTime: currentDayStart,
+        endTime: currentDayEnd,
+      };
+  }
 }
 
 function getPeriodTimeRange(period = 'real_time', customStart = null, customEnd = null) {
@@ -821,7 +871,7 @@ class ShopeeService {
     return product || null;
   }
 
-  async fetchShopeeAdsMetrics() {
+  async fetchShopeeAdsMetrics({ period = 'real_time', startTime: customStart, endTime: customEnd } = {}) {
     const session = await this.getActiveSession();
     if (!session?.cookieString || !session?.storeId) {
       return {
@@ -835,7 +885,7 @@ class ShopeeService {
     try {
       const csrfToken = extractCsrfFromCookie(session.cookieString);
       if (!csrfToken) throw new Error('Sesi Shopee aktif tidak memiliki token CSRF.');
-      const { startTime, endTime } = getJakartaDayRange();
+      const { startTime, endTime, period: activePeriod } = getAdsTimeRange(period, customStart, customEnd);
       const query = new URLSearchParams({ SPC_CDS: csrfToken, SPC_CDS_VER: '2' });
       const response = await axios.post(`${SHOPEE_HOMEPAGE_ADS_ENDPOINT}?${query}`, {
         start_time: startTime,
@@ -922,7 +972,7 @@ class ShopeeService {
         topCampaigns: campaigns,
         dataSource: 'SHOPEE_API',
         message: campaigns.length ? null : 'Tidak ada kampanye Product Ads aktif pada periode ini.',
-        period: { startTime, endTime },
+        period: { type: activePeriod, startTime, endTime },
       };
     } catch (err) {
       const status = err.response?.status;

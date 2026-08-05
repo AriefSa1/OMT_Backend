@@ -112,9 +112,108 @@ async function updateProductEconomics(req, res) {
 }
 
 async function getShopeeAds(req, res) {
+  const {
+    period = 'real_time',
+    start_time,
+    end_time,
+    sort_by = 'spend',
+    direction = 'desc',
+    force_snapshot = 'false',
+  } = req.query;
+
+  const sortBy = sort_by;
+  const ascending = direction === 'asc';
+
+  if (force_snapshot !== 'true') {
+    try {
+      const liveData = await shopeeService.fetchShopeeAdsMetrics({
+        period,
+        startTime: start_time,
+        endTime: end_time,
+      });
+
+      if (liveData.success && liveData.dataSource === 'SHOPEE_API') {
+        if (period === 'real_time' || period === 'today') {
+          syncService.persistAdsSnapshot(liveData).catch((err) => {
+            console.warn('[ShopeeController] Failed to persist background ads snapshot:', err.message);
+          });
+        }
+
+        const sortFields = {
+          name: 'name',
+          state: 'state',
+          dailyBudget: 'dailyBudget',
+          spend: 'spend',
+          sales: 'sales',
+          ctr: 'ctr',
+          roas: 'roas',
+        };
+        const sortField = sortFields[sortBy] || 'spend';
+        const sortedCampaigns = [...(liveData.topCampaigns || [])].sort((left, right) => {
+          const leftValue = typeof left[sortField] === 'string' ? left[sortField].toLowerCase() : Number(left[sortField] || 0);
+          const rightValue = typeof right[sortField] === 'string' ? right[sortField].toLowerCase() : Number(right[sortField] || 0);
+          if (leftValue === rightValue) return String(left.name).localeCompare(String(right.name));
+          return (leftValue > rightValue ? 1 : -1) * (ascending ? 1 : -1);
+        });
+
+        const session = await shopeeService.getActiveSession();
+        const dbHistory = await prisma.shopeeAdsData.findMany({
+          where: session?.storeId ? { storeId: session.storeId } : {},
+          orderBy: { date: 'desc' },
+          take: 30,
+        });
+
+        const history = dbHistory.reverse().map((row) => ({
+          date: row.date,
+          spend: Number(row.spend || 0),
+          sales: Number(row.sales || 0),
+          roas: Number(row.roas || 0),
+          ctr: Number(row.ctr || 0),
+          dataAsOf: row.dataAsOf,
+        }));
+
+        const meta = {
+          status: 'Segar',
+          source: 'SHOPEE_API',
+          dataAsOf: new Date().toISOString(),
+          message: liveData.message,
+          period: liveData.period,
+        };
+
+        return res.json({
+          success: true,
+          totalSpend: liveData.totalSpend,
+          totalSalesGenerated: liveData.totalSalesGenerated,
+          roas: liveData.roas,
+          impressions: liveData.impressions,
+          clicks: liveData.clicks,
+          ctr: liveData.ctr,
+          voucherSpend: liveData.voucherSpend,
+          voucherSales: liveData.voucherSales,
+          amountAudit: {
+            rawSpend: liveData.rawSpend,
+            rawSales: liveData.rawSales,
+            rawVoucherSpend: liveData.rawVoucherSpend,
+            rawVoucherSales: liveData.rawVoucherSales,
+            divisor: liveData.amountDivisor || 100000,
+          },
+          topCampaigns: sortedCampaigns,
+          sort: { sortBy: sortField, direction: ascending ? 'asc' : 'desc' },
+          history,
+          period: liveData.period,
+          meta,
+          dataSource: 'SHOPEE_API',
+          dataAsOf: meta.dataAsOf,
+        });
+      }
+    } catch (err) {
+      console.warn('[ShopeeController] Live ads fetch failed, falling back to snapshot:', err.message);
+    }
+  }
+
   const snapshot = await snapshotService.getAdsSnapshot({
-    sortBy: req.query.sort_by,
-    direction: req.query.direction,
+    sortBy,
+    direction,
   });
   return res.json({ success: true, ...snapshot, dataSource: snapshot.meta.source, dataAsOf: snapshot.meta.dataAsOf });
 }

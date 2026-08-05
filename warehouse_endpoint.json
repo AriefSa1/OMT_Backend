@@ -1,0 +1,296 @@
+{
+  "project": "PDC Selling Team & Warehouse API Documentation",
+  "base_website": "https://sellingteam.pdcoke.com/",
+  "last_updated": "2026-08-05",
+  "architecture": {
+    "frontend": "SolidJS + Vite SPA",
+    "gateway_rest": "https://pdcgudang.et.r.appspot.com",
+    "microservices_grpc_web": {
+      "shared_service": "https://shared-service-1008190962565.asia-southeast2.run.app",
+      "selling_service": "https://selling-service-1008190962565.asia-southeast2.run.app",
+      "accounting_service": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "order_service": "https://order-service-1008190962565.asia-southeast2.run.app",
+      "product_service": "https://product-service-1008190962565.asia-southeast2.run.app",
+      "warehouse_service": "https://warehouse-service-1008190962565.asia-southeast2.run.app",
+      "withdrawal_service": "https://withdrawal-service-1008190962565.asia-southeast2.run.app"
+    }
+  },
+  "authentication": {
+    "type": "Bearer Token + Custom Metadata Header",
+    "headers": {
+      "Authorization": "Bearer <auth_token>",
+      "X-Pdc-Source": "<base64_encoded_protobuf_struct>",
+      "Content-Type": "application/json (REST) / application/connect+proto (Connect-RPC)"
+    }
+  },
+  "rest_endpoints": [
+    {
+      "category": "Authentication & Users",
+      "method": "POST",
+      "path": "/v1/users/login",
+      "description": "Autentikasi login username & password, mengembalikan auth_token dan daftar team",
+      "payload": {
+        "username": "user_example",
+        "password": "password_example"
+      }
+    },
+    {
+      "category": "Authentication & Users",
+      "method": "GET",
+      "path": "/v1/users/info",
+      "description": "Mengambil informasi profil user yang sedang aktif dan hak aksesnya",
+      "payload": null
+    },
+    {
+      "category": "Authentication & Users",
+      "method": "GET",
+      "path": "/v1/users/search",
+      "search_params": {
+        "role_key": "selling_admin",
+        "keyword": "nama_user"
+      }
+    },
+    {
+      "category": "Team Management",
+      "method": "GET",
+      "path": "/v1/teams/list",
+      "description": "Daftar tim penjualan/gudang yang dimiliki oleh user beserta konfigurasi limitnya",
+      "payload": null
+    },
+    {
+      "category": "Team Management",
+      "method": "GET",
+      "path": "/v1/teams/performance",
+      "description": "Metrik performa tim (total transaksi, omset, margin laba/rugi)",
+      "search_params": {
+        "start_date": "2026-07-01",
+        "end_date": "2026-08-05",
+        "team_id": 123
+      }
+    },
+    {
+      "category": "Warehouse & Racks",
+      "method": "GET",
+      "path": "/v1/warehouses/list",
+      "description": "Daftar gudang aktif, kapasitas penyimpanan, dan tarif sewa/operasional",
+      "payload": null
+    },
+    {
+      "category": "Warehouse & Racks",
+      "method": "GET",
+      "path": "/v1/warehouses/racks",
+      "description": "Daftar nomor rak dan SKU yang disimpan di rak tersebut",
+      "search_params": {
+        "warehouse_id": 1
+      }
+    },
+    {
+      "category": "Warehouse & Racks",
+      "method": "GET",
+      "path": "/v1/warehouses/products",
+      "description": "Daftar seluruh produk dan varian yang tersimpan di gudang",
+      "search_params": {
+        "warehouse_id": 1,
+        "page": 1,
+        "limit": 50
+      }
+    },
+    {
+      "category": "Warehouse & Racks",
+      "method": "GET",
+      "path": "/v1/warehouses/insight/overview",
+      "description": "Statistik KPI operasional gudang (inbound, outbound, turnaround time)"
+    },
+    {
+      "category": "Inventory & Inbound",
+      "method": "GET",
+      "path": "/v1/invertories/sku_list",
+      "description": "Daftar master katalog SKU lengkap dengan stok siap kirim (ready stock) dan pending restock",
+      "search_params": {
+        "team_id": 123,
+        "keyword": ""
+      }
+    },
+    {
+      "category": "Inventory & Inbound",
+      "method": "GET",
+      "path": "/v1/invertories/dashboard/overview",
+      "description": "Ringkasan metrik dashboard inventory (stok siap, nilai aset produk, restock berjalan, invoice belum lunas)"
+    },
+    {
+      "category": "Inventory & Inbound",
+      "method": "GET",
+      "path": "/v1/invertories/transaction",
+      "description": "Riwayat transaksi mutasi stok masuk (inbound) dan keluar (outbound)",
+      "search_params": {
+        "page": 1,
+        "limit": 20,
+        "type": "inbound",
+        "status": "completed"
+      }
+    },
+    {
+      "category": "Inventory & Inbound",
+      "method": "POST",
+      "path": "/v1/invertories/restock",
+      "description": "Membuat order restock inbound baru dengan harga modal supplier & ongkir",
+      "payload": {
+        "warehouse_id": 1,
+        "supplier_id": 5,
+        "items": [
+          {
+            "sku_id": 101,
+            "quantity": 100,
+            "unit_price": 50000
+          }
+        ],
+        "shipping_cost": 25000,
+        "receipt_number": "RESI12345"
+      }
+    },
+    {
+      "category": "Inventory & Inbound",
+      "method": "GET",
+      "path": "/v1/invertories/stock_flow",
+      "description": "Timeline histori pergerakan keluar-masuk stok untuk varian produk tertentu",
+      "search_params": {
+        "sku_id": 101
+      }
+    }
+  ],
+  "connect_rpc_services": [
+    {
+      "service": "access_iface.v1.FrontendAccessService",
+      "host": "https://shared-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "SetupAccess",
+        "MenuAccess"
+      ],
+      "description": "Inisialisasi hak akses menu navigasi dan fitur UI frontend berdasarkan role tim"
+    },
+    {
+      "service": "selling_iface.v1.SellingStatService",
+      "host": "https://selling-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "Stat"
+      ],
+      "description": "Statistik KPI penjualan tim, omset penjualan, margin keuntungan, dan pemenuhan order"
+    },
+    {
+      "service": "selling_iface.v1.ConfigurationLimitService",
+      "host": "https://selling-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "LimitInvoice",
+        "OweDefaultLimitGet",
+        "OweDefaultLimitEdit",
+        "OweLimitCustomCreate",
+        "OweLimitCustomList",
+        "CheckOweLimit",
+        "SellingLimitProfitGet",
+        "SellingLimitProfitEdit"
+      ],
+      "description": "Pengecekan plafon limit piutang/utang tim, batas kredit restock, dan konfigurasi margin profit"
+    },
+    {
+      "service": "order_iface.v1.OrderService",
+      "host": "https://order-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "OrderDraftCreate",
+        "OrderDraftList",
+        "OrderDraftGet",
+        "OrderDraftCheck",
+        "OrderCreate",
+        "OrderChangeStatus",
+        "OrderFundSet",
+        "OrderTagAdd",
+        "OrderCompleted",
+        "OrderReturnArrived",
+        "OrderList",
+        "OrderOverview",
+        "MpPaymentCreate",
+        "MpPaymentOrderList",
+        "OrderTracking"
+      ],
+      "description": "Manajemen siklus pesanan marketplace, pembuatan order fulfillment gudang, update resi kurir, dan settlement dana"
+    },
+    {
+      "service": "accounting_iface.v1.AccountingCoreService",
+      "host": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "AccountKeyList",
+        "TypeLabelList",
+        "AccountCreate",
+        "AccountList",
+        "AccountBalanceInit",
+        "TransferCreate",
+        "TransferCancel",
+        "AccountMutationList"
+      ],
+      "description": "Chart of Accounts (COA), saldo buku kas/bank, mutasi transaksi debit/kredit, dan transfer antar akun"
+    },
+    {
+      "service": "accounting_iface.v1.AdsExpenseService",
+      "host": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "AdsExCreate",
+        "AdsExList",
+        "AdsExEdit",
+        "AdsExShopMetric",
+        "AdsExOverviewMetric",
+        "AdsExTimeMetric"
+      ],
+      "description": "Pencatatan dan metrik pengeluaran biaya iklan per toko (Shopee Ads, Tokopedia Ads, TikTok Ads)"
+    },
+    {
+      "service": "accounting_iface.v1.ExpenseService",
+      "host": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "ExpenseCreate",
+        "ExpenseList",
+        "ExpenseTypeList",
+        "ExpenseOverviewMetric",
+        "ExpenseTimeMetric"
+      ],
+      "description": "Pencatatan biaya operasional tim penjualan dan operasional gudang"
+    },
+    {
+      "service": "accounting_iface.v1.LedgerService",
+      "host": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "EntryList",
+        "EntryListExtra",
+        "EntryListExport",
+        "TransactionDetail",
+        "TagCreate",
+        "TagList"
+      ],
+      "description": "Buku besar (General Ledger), ekspor pembukuan, jurnal entri ganda, dan taxonomi tag transaksi"
+    },
+    {
+      "service": "report_iface.v1.AccountReportService",
+      "host": "https://accounting-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "Balance",
+        "DailyBalance",
+        "BalanceDetail",
+        "DailyBalanceDetail",
+        "MonthlyBalance",
+        "MonthlyBalanceDetail",
+        "DailyUpdateBalance",
+        "BalanceResync"
+      ],
+      "description": "Laporan neraca keuangan harian/bulanan, laporan laba rugi, dan rekalkulasi sinkronisasi saldo buku"
+    },
+    {
+      "service": "withdrawal_iface.v1.WithdrawalService",
+      "host": "https://withdrawal-service-1008190962565.asia-southeast2.run.app",
+      "methods": [
+        "SubmitWithdrawal",
+        "SubmitWithdrawalShopee",
+        "SubmitWithdrawalTiktok",
+        "GetTaskList"
+      ],
+      "description": "Pencairan dana dan rekonsiliasi statement penarikan saldo marketplace (Shopee / TikTok Shop)"
+    }
+  ]
+}
