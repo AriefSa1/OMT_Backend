@@ -902,12 +902,37 @@ class SnapshotService {
   }
 
   async getDashboardOverview() {
+    const shopeeService = require('./shopeeService');
+    const syncService = require('./syncService');
+    const session = await shopeeService.getActiveSession();
+
+    if (session?.isActive && session?.storeId) {
+      try {
+        await Promise.allSettled([
+          shopeeService.fetchShopeeAdsMetrics({ period: 'real_time' }).then((liveAds) => {
+            if (liveAds?.success) syncService.persistAdsSnapshot(liveAds).catch(() => {});
+          }),
+          shopeeService.fetchOrderSummaryRealtime().then(async (realtimeOrders) => {
+            if (realtimeOrders?.row) {
+              await shopeeService.persistOrderSummaryHistory(session.storeId, [realtimeOrders.row]);
+            }
+          }),
+        ]);
+      } catch (err) {
+        console.warn('[snapshotService] Live overview background fetch error:', err.message);
+      }
+    }
+
     const [context, catalog, ads, warehouse, orders] = await Promise.all([
       this.getContext(),
       this.getCatalogSnapshot({ page: 1, limit: 8, sort: 'salesCount' }),
       this.getAdsSnapshot(),
       this.getWarehouseSnapshot({ page: 1, limit: 8 }),
-      prisma.shopeeOrderSummary.findMany({ orderBy: { date: 'desc' }, take: 30 }),
+      prisma.shopeeOrderSummary.findMany({
+        where: session?.storeId ? { storeId: session.storeId } : {},
+        orderBy: { date: 'desc' },
+        take: 30,
+      }),
     ]);
     const latestOrder = orders[0] || null;
     // Computed before salesTrend, which reverses `orders` in place.

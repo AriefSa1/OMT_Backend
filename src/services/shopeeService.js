@@ -412,7 +412,72 @@ class ShopeeService {
    * The `confirmed_*` series is used because every other surface in this app reports
    * confirmed orders; mixing in `paid_*` would make the dashboard disagree with itself.
    */
-  async fetchOrderSummaryHistory({ days = 30, cookie: customCookie = '' } = {}) {
+  /**
+   * Fetches real-time key metrics for today (GMV, orders, conversion rate, AOV).
+   */
+  async fetchOrderSummaryRealtime({ cookie: customCookie = '' } = {}) {
+    const session = await this.getActiveSession();
+    const cookie = customCookie || activeCookie || session?.cookieString || '';
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', row: null, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
+    }
+
+    const endTime = Math.floor(Date.now() / 1000);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(endTime - 86400),
+      end_time: String(endTime),
+      period: 'real_time',
+      fetag: 'datacenter_overview',
+    });
+
+    try {
+      const response = await axios.get(`${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`, {
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 12000,
+      });
+      const payload = response.data || {};
+      if (payload.code !== 0 || !payload.result) {
+        return { source: 'EMPTY', row: null, message: `Seller Center menolak realtime key metrics${payload.msg ? `: ${payload.msg}` : '.'}` };
+      }
+      const result = payload.result;
+      const today = getJakartaDateKey(new Date());
+      const gmv = asFiniteNumber(result.confirmed_gmv?.value ?? result.place_gmv?.value);
+      const orderCount = Math.round(asFiniteNumber(result.confirmed_orders?.value ?? result.place_orders?.value));
+      const averageOrderValue = asFiniteNumber(result.confirmed_sales_per_order?.value ?? result.place_sales_per_order?.value);
+      const uv = asFiniteNumber(result.shop_uv?.value);
+      const directConversionRate = asFiniteNumber(result.shop_uv_to_confirmed_buyers_rate?.value);
+      const conversionRate = directConversionRate > 0 ? directConversionRate : (uv > 0 ? (orderCount / uv) : 0);
+
+      const row = {
+        date: today,
+        gmv,
+        orderCount,
+        conversionRate,
+        averageOrderValue,
+        cancelledOrders: 0,
+        cancelledSales: 0,
+        returnRefundOrders: 0,
+        returnRefundSales: 0,
+      };
+
+      return {
+        source: 'SHOPEE_API',
+        row,
+        message: null,
+      };
+    } catch (err) {
+      return {
+        source: 'EMPTY',
+        row: null,
+        message: err.message,
+      };
+    }
+  }
+
+  async fetchOrderSummaryHistory({ days = 30, includeToday = true, cookie: customCookie = '' } = {}) {
     const session = await this.getActiveSession();
     const cookie = customCookie || activeCookie || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
@@ -440,7 +505,20 @@ class ShopeeService {
       if (payload.code !== 0 || !payload.result) {
         return { source: 'EMPTY', rows: [], message: `Seller Center menolak permintaan ringkasan pesanan${payload.msg ? `: ${payload.msg}` : '.'}` };
       }
-      const rows = this.normalizeKeyMetricSeries(payload.result);
+      let rows = this.normalizeKeyMetricSeries(payload.result);
+
+      if (includeToday) {
+        const todayKey = getJakartaDateKey(new Date());
+        const alreadyHasToday = rows.some((r) => r.date === todayKey);
+        if (!alreadyHasToday) {
+          const realtimeRes = await this.fetchOrderSummaryRealtime({ cookie }).catch(() => null);
+          if (realtimeRes?.row) {
+            rows.push(realtimeRes.row);
+            rows.sort((left, right) => left.date.localeCompare(right.date));
+          }
+        }
+      }
+
       return {
         source: 'SHOPEE_API',
         rows,
