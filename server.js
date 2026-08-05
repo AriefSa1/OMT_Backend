@@ -23,7 +23,37 @@ const taskRoutes = require('./src/routes/taskRoutes');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: true, credentials: true }));
+const allowedOriginsConfig = process.env.CORS_ALLOWED_ORIGINS
+  ? process.env.CORS_ALLOWED_ORIGINS.split(',').map((s) => s.trim().replace(/\/$/, '')).filter(Boolean)
+  : [];
+
+const defaultAllowedOrigins = [
+  'https://94media.art',
+  'https://www.94media.art',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+];
+
+const allowedOrigins = Array.from(new Set([...defaultAllowedOrigins, ...allowedOriginsConfig]));
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    const cleanOrigin = origin.replace(/\/$/, '');
+    if (
+      allowedOrigins.includes(cleanOrigin) ||
+      allowedOrigins.some((allowed) => cleanOrigin.endsWith(allowed.replace(/^https?:\/\//, '')))
+    ) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS origin ${origin} tidak diizinkan oleh kebijakan keamanan.`));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.use('/api/auth', authRoutes);

@@ -3,12 +3,12 @@ const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
 const { wrapHandlers } = require('../utils/asyncHandler');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'aesthetic_girly_fashion_analytics_secret_key_2026';
+const { getJwtSecret } = require('../utils/jwt');
 
 function generateToken(user) {
   return jwt.sign(
     { userId: user.id, email: user.email, role: user.role },
-    JWT_SECRET,
+    getJwtSecret(),
     { expiresIn: '24h' }
   );
 }

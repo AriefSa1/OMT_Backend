@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const prisma = require('../utils/prisma');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'aesthetic_girly_fashion_analytics_secret_key_2026';
+const { getJwtSecret } = require('../utils/jwt');
 
 async function authMiddleware(req, res, next) {
   try {
@@ -22,7 +22,7 @@ async function authMiddleware(req, res, next) {
       });
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, getJwtSecret());
 
     // A valid token must resolve to an existing account; deleted users lose access.
     const userId = decoded.userId || decoded.id;
