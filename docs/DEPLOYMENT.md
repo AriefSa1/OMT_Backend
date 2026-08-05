@@ -9,9 +9,31 @@ Target:
 
 ---
 
+## STATUS SAAT INI (per 2026-08-06)
+
+Sudah **terdeploy dan berjalan**:
+- Backend: `https://omt-backend-34ap.onrender.com` (Render free tier, region Singapura) — health OK.
+- Frontend: `https://94media.art` (+ `www`) — mengarah ke backend di atas via `NEXT_PUBLIC_API_BASE`.
+- Basis data: PostgreSQL Neon (bukan lagi SQLite — blocker §0.2 sudah teratasi).
+
+Postur keamanan runtime sudah diverifikasi terhadap deploy langsung:
+- Endpoint data balas 401 tanpa token; CORS menolak origin selain `94media.art`.
+- `/api/settings` tidak mengembalikan nilai secret (hanya `*Configured: boolean`).
+- Fallback JWT publik sudah dihapus — produksi kini wajib `JWT_SECRET` (Render menyetelnya
+  otomatis; diverifikasi token invalid → 401, bukan 500).
+
+**Yang MASIH terbuka dan hanya Anda yang bisa tuntaskan** — lihat §0.1. Keputusan Anda
+2026-08-06: repo **tetap publik** dan riwayat **tidak** ditulis ulang. Konsekuensinya
+kredensial di riwayat harus dianggap bocor permanen sampai **dirotasi**.
+
 ## 0. Dua hal yang harus diselesaikan SEBELUM deploy pertama
 
-### 0.1 Kredensial produksi ada di dalam riwayat git — BLOKIR DEPLOY
+### 0.1 Kredensial produksi ada di dalam riwayat git — WAJIB ROTASI (repo publik, riwayat dibiarkan)
+
+> Pindaian ulang 2026-08-06 pada blob di riwayat (commit `c6eb1ca`): **14 cookie sesi
+> Shopee (`SPC_*`), 6 hash bcrypt akun, username+password gudang, kunci Gemini**. Repo
+> `AriefSa1/OMT_Backend` publik dan riwayat sengaja tidak dibersihkan, jadi rotasi bukan
+> opsional — ini satu-satunya perbaikan nyata.
 
 Dua berkas backup basis data ikut ter-commit ke repositori:
 
@@ -41,13 +63,12 @@ Yang harus dilakukan, berurutan:
    - Keluar dari semua sesi Seller Center lalu ambil cookie baru
    - Cabut kunci Gemini lama di Google AI Studio, buat yang baru
    - Ganti password akun PDC Gudang
-2. Hapus kedua berkas dari riwayat (`git filter-repo --path prisma/dev.db.before-audit-20260804.bak --path prisma/dev.db.before-multiwarehouse.bak --invert-paths`, lalu
-   force-push). Ini menulis ulang riwayat — koordinasikan bila ada klon lain.
-3. `.gitignore` sudah mencakup `*.bak` dan `prisma/*.db` sejak perubahan Anda terakhir,
-   jadi backup baru tidak akan terulang.
+   - Minta 6 user dashboard mengganti password (hash-nya bocor)
+2. (DILEWATI atas keputusan Anda) Membersihkan riwayat: bila kelak berubah pikiran,
+   `git filter-repo --path prisma/dev.db.before-audit-20260804.bak --path prisma/dev.db.before-multiwarehouse.bak --invert-paths` lalu force-push. Menulis ulang riwayat & memicu redeploy Render.
+3. `.gitignore` sudah mencakup `*.bak` dan `prisma/*.db`, jadi backup baru tidak terulang. ✅
 
-Selama langkah 1 belum dilakukan, mendeploy sama dengan menyebarkan kredensial itu ke
-satu tempat lagi.
+Karena riwayat dibiarkan publik, langkah 1 (rotasi) adalah pertahanan satu-satunya.
 
 ### 0.2 SQLite di Render free tier = data hilang setiap deploy
 
