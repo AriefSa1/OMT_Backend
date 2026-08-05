@@ -4,6 +4,7 @@
   "description": "Backend service for Shopee Marketplace & Warehouse Analytics Dashboard",
   "main": "server.js",
   "scripts": {
+    "postinstall": "prisma generate",
     "start": "node server.js",
     "dev": "node server.js",
     "build": "npx prisma generate && npx prisma db push --accept-data-loss",
