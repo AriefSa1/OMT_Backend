@@ -1,3 +1,7 @@
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'file:./dev.db';
+}
+
 let PrismaClient;
 try {
   PrismaClient = require('../../node_modules/.prisma/client-active').PrismaClient;
