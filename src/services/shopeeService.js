@@ -506,6 +506,81 @@ class ShopeeService {
     }
   }
 
+  /**
+   * Where the sales came from (endpoint_shopee.json -> datacenter_traffic_sources).
+   * Read live: it is a store-level breakdown of a moving window, and nothing else in the
+   * app consumes it, so there is no snapshot to keep in step.
+   *
+   * Ratios are Shopee's own — they are not recomputed here, and they do not sum to 1:
+   * paid ads overlap the organic channels.
+   */
+  async fetchTrafficSources({ days = 7 } = {}) {
+    const session = await this.getActiveSession();
+    const cookie = activeCookie || session?.cookieString || '';
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', channels: [], message: 'Simpan cookie Shopee yang valid di Pengaturan untuk melihat sumber kunjungan.' };
+    }
+
+    const safeDays = Math.min(30, Math.max(1, Number(days) || 7));
+    const endTime = Math.floor(Date.now() / 1000);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(endTime - safeDays * 86400),
+      end_time: String(endTime),
+      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      order_type: 'confirmed',
+    });
+
+    try {
+      const response = await axios.get(`https://seller.shopee.co.id/api/mydata/v1/dashboard/traffic-sources/?${params}`, {
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data || {};
+      const overview = payload.result?.overview;
+      if (payload.code !== 0 || !overview) {
+        return { source: 'EMPTY', channels: [], message: `Seller Center menolak permintaan sumber kunjungan${payload.msg ? `: ${payload.msg}` : '.'}` };
+      }
+
+      const definitions = [
+        { key: 'product_card', label: 'Kartu produk / pencarian' },
+        { key: 'live', label: 'Shopee Live' },
+        { key: 'video', label: 'Video' },
+        { key: 'affiliate', label: 'Afiliasi' },
+        { key: 'paid_ads', label: 'Iklan berbayar' },
+      ];
+
+      return {
+        source: 'SHOPEE_API',
+        days: safeDays,
+        dataAsOf: new Date().toISOString(),
+        totalSales: asFiniteNumber(overview.total_sales),
+        channels: definitions
+          .filter((definition) => overview[definition.key] !== undefined)
+          .map((definition) => ({
+            key: definition.key,
+            label: definition.label,
+            sales: asFiniteNumber(overview[definition.key]),
+            // Shopee's own share, kept as a fraction; paid ads overlap the others.
+            ratio: Number.isFinite(Number(overview[`${definition.key}_ratio`])) ? Number(overview[`${definition.key}_ratio`]) : null,
+            changeRatio: Number.isFinite(Number(overview[`${definition.key}_pct_diff`])) ? Number(overview[`${definition.key}_pct_diff`]) : null,
+          })),
+        message: null,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        channels: [],
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini untuk data sumber kunjungan.'
+          : status ? `Sumber kunjungan Seller Center mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
+  }
+
   async persistOrderSummaryHistory(storeId, rows = []) {
     if (!storeId || !rows.length) return 0;
     let written = 0;

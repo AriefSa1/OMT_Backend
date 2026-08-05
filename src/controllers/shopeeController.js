@@ -185,6 +185,13 @@ async function getProductPerformance(req, res) {
   }
 }
 
+async function getTrafficSources(req, res) {
+  // Live read: a store-level breakdown of a moving window, with nothing snapshotted to
+  // keep in step. An outage is reported through `source`, not hidden behind zeros.
+  const result = await shopeeService.fetchTrafficSources({ days: Number(req.query.days) || 7 });
+  return res.json({ success: result.source === 'SHOPEE_API', ...result });
+}
+
 module.exports = wrapHandlers({
   parseCookie,
   getSessionStatus,
@@ -193,6 +200,7 @@ module.exports = wrapHandlers({
   updateProductEconomics,
   getShopeeAds,
   getProductPerformance,
+  getTrafficSources,
   triggerSync,
   validateCookie,
 });
