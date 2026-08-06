@@ -67,4 +67,99 @@ async function getStoresStats(req, res) {
   });
 }
 
-module.exports = wrapHandlers({ getStoresStats });
+const MAX_COMPARE_STORES = 6;
+
+/**
+ * Detail satu toko untuk pembanding: deret penjualan harian, top produk, dan mix kategori
+ * atas jendela yang sama. Ketiganya diambil dengan groupBy/agregasi supaya tidak menarik
+ * ribuan baris snapshot mentah ke aplikasi.
+ */
+async function buildStoreDetail(storeId, currentStart) {
+  const [salesRows, categoryRows, topRows] = await Promise.all([
+    prisma.shopeeOrderSummary.findMany({
+      where: { storeId, date: { gte: currentStart } },
+      select: { date: true, gmv: true, orderCount: true },
+      orderBy: { date: 'asc' }
+    }),
+    prisma.productMetricSnapshot.groupBy({
+      by: ['category'],
+      where: { storeId, date: { gte: currentStart } },
+      _sum: { confirmedSales: true }
+    }),
+    prisma.productMetricSnapshot.groupBy({
+      by: ['shopeeItemId'],
+      where: { storeId, date: { gte: currentStart } },
+      _sum: { confirmedSales: true, confirmedUnits: true },
+      orderBy: { _sum: { confirmedSales: 'desc' } },
+      take: 5
+    })
+  ]);
+
+  // Nama produk tidak ada di hasil groupBy shopeeItemId; ambil sekali untuk item teratas saja.
+  const itemIds = topRows.map((r) => r.shopeeItemId);
+  const products = itemIds.length
+    ? await prisma.shopeeProduct.findMany({ where: { shopeeItemId: { in: itemIds } }, select: { shopeeItemId: true, name: true } })
+    : [];
+  const nameById = new Map(products.map((p) => [p.shopeeItemId, p.name]));
+
+  const categoryMix = categoryRows
+    .map((r) => ({ category: r.category, sales: r._sum.confirmedSales || 0 }))
+    .filter((c) => c.sales > 0)
+    .sort((a, b) => b.sales - a.sales)
+    .slice(0, 6);
+
+  const topProducts = topRows.map((r) => ({
+    shopeeItemId: r.shopeeItemId,
+    name: nameById.get(r.shopeeItemId) || r.shopeeItemId,
+    sales: r._sum.confirmedSales || 0,
+    units: r._sum.confirmedUnits || 0
+  }));
+
+  return {
+    salesSeries: salesRows.map((r) => ({ date: r.date, gmv: r.gmv, orders: r.orderCount })),
+    categoryMix,
+    topProducts
+  };
+}
+
+/**
+ * GET /api/admin/analytics/compare?storeIds=a,b&days=30
+ * Pembanding mendalam 2-6 toko: metrik ringkas + deret penjualan + top produk + kategori.
+ */
+async function compareStores(req, res) {
+  const storeIds = String(req.query.storeIds || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const uniqueIds = [...new Set(storeIds)].slice(0, MAX_COMPARE_STORES);
+  if (uniqueIds.length < 2) {
+    return res.status(400).json({ success: false, error: 'Pilih minimal 2 toko untuk dibandingkan.' });
+  }
+
+  const days = parseDays(req.query.days);
+  const { currentStart } = require('../services/storeStatsService').buildWindows(days);
+
+  const sessions = await prisma.storeSession.findMany({
+    where: { storeId: { in: uniqueIds } },
+    select: { storeId: true, storeName: true, user: { select: { name: true, email: true } } }
+  });
+  const sessionById = new Map(sessions.map((s) => [s.storeId, s]));
+
+  const metrics = await storeStatsService.getStoreMetrics(uniqueIds, days);
+  const details = await Promise.all(uniqueIds.map((id) => buildStoreDetail(id, currentStart)));
+
+  const stores = uniqueIds.map((id, i) => {
+    const sess = sessionById.get(id);
+    return {
+      storeId: id,
+      storeName: sess?.storeName || id,
+      owner: sess?.user ? { name: sess.user.name, email: sess.user.email } : null,
+      metrics: metrics.get(id) || null,
+      ...details[i]
+    };
+  });
+
+  return res.json({ success: true, data: { periodDays: days, currentStart, stores } });
+}
+
+module.exports = wrapHandlers({ getStoresStats, compareStores });
