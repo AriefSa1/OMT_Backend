@@ -8,8 +8,8 @@ class ShopeeInsightsService {
     return Number.isFinite(number) ? number : 0;
   }
 
-  async request(path, parameters = {}) {
-    const session = await shopeeService.getActiveSession();
+  async request(path, parameters = {}, storeId = null) {
+    const session = await shopeeService.getActiveSession(storeId);
     const cookie = session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) throw new Error('A valid Shopee session is required for marketplace intelligence.');
@@ -28,19 +28,19 @@ class ShopeeInsightsService {
     return data.list || data.items || data.products || [];
   }
 
-  async getMarketplaceInsights({ campaignIds = [] } = {}) {
+  async getMarketplaceInsights({ campaignIds = [], storeId = null } = {}) {
     const now = Math.floor(Date.now() / 1000);
     try {
       const performancePayload = await this.request('/api/mydata/v4/product/performance/', {
         start_time: String(now - 3600), end_time: String(now), period: 'real_time', keyword: '',
         category_type: 'shopee', category_id: '-1', page_size: '50', page_num: '1',
         order_type: 'confirmed', order_by: 'confirmed_sales.desc',
-      });
+      }, storeId);
       const normalizedCampaignIds = campaignIds.map(String).map((id) => id.trim()).filter(Boolean);
       const adsPayload = normalizedCampaignIds.length
         ? await this.request('/api/pas/v1/todo/daily_budget/check_campaign_list/', {
           campaign_ids: normalizedCampaignIds.join(','),
-        })
+        }, storeId)
         : null;
       return {
         source: 'SHOPEE_API',
@@ -111,14 +111,14 @@ class ShopeeInsightsService {
     return signals.slice(0, 30);
   }
 
-  async getCompetitorProducts({ itemId, l2CategoryId, l3CategoryId }) {
+  async getCompetitorProducts({ itemId, l2CategoryId, l3CategoryId, storeId = null }) {
     if (!itemId || !l2CategoryId || !l3CategoryId) {
       return { source: 'EMPTY', message: 'itemId, l2CategoryId, and l3CategoryId are required.', products: [] };
     }
     try {
       const payload = await this.request('/api/mydata/v4/seller-coach/seller-competing-products/', {
         itemid: String(itemId), l2catid: String(l2CategoryId), l3catid: String(l3CategoryId),
-      });
+      }, storeId);
       return { source: 'SHOPEE_API', message: null, products: this.extractList(payload) };
     } catch (err) {
       return { source: 'EMPTY', message: `Competitor data could not be loaded${err.response?.status ? ` (HTTP ${err.response.status})` : ''}.`, products: [] };

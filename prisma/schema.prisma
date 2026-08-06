@@ -9,27 +9,33 @@ generator client {
 }
 
 model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
+  id        String         @id @default(uuid())
+  email     String         @unique
   password  String
   name      String
-  role      String   @default("ANALYST") // ADMIN, MANAGER, ANALYST
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  role      String         @default("USER") // ADMIN, USER
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  stores    StoreSession[]
 }
 
 model StoreSession {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   storeName    String
-  storeId      String   @unique
+  storeId      String    @unique
+  userId       String?
   cookieString String
   userAgent    String
   csrfToken    String?
-  isActive     Boolean  @default(true)
-  lastSyncedAt DateTime @default(now())
+  isActive     Boolean   @default(true)
+  lastSyncedAt DateTime  @default(now())
   expiresAt    DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model ShopeeProduct {
@@ -423,3 +429,38 @@ model OptimizationTaskEvent {
 
   @@index([taskId, createdAt])
 }
+
+model RegistrationCode {
+  id            String    @id @default(uuid())
+  code          String    @unique
+  role          String    @default("USER") // ADMIN, USER
+  maxUses       Int       @default(1) // 0 untuk unlimited, >= 1 untuk batas jumlah penggunaan
+  usedCount     Int       @default(0)
+  isActive      Boolean   @default(true)
+  expiresAt     DateTime?
+  description   String?
+  createdById   String?
+  createdByName String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([code, isActive])
+  @@index([role])
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid())
+  action     String   // USER_DELETE, ROLE_CHANGE, CODE_GENERATE, PASSWORD_RESET, USER_CREATE, SETTINGS_UPDATE
+  details    String?  // Keterangan detail / payload json
+  targetId   String?
+  targetName String?
+  actorId    String?
+  actorName  String?
+  actorEmail String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([actorId])
+}
+

@@ -12,7 +12,8 @@ async function getSyncLogs(req, res) {
 }
 
 async function runFullSync(req, res) {
-  const result = await syncService.syncAll({ origin: 'MANUAL' });
+  const storeId = req.body.store_id || req.body.storeId || req.query.store_id || req.query.storeId || null;
+  const result = await syncService.syncAll({ origin: 'MANUAL', storeId });
   return res.status(result.success ? 200 : 502).json(result);
 }
 

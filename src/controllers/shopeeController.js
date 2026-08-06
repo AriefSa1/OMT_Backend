@@ -26,7 +26,48 @@ function toPublicSession(session) {
     lastSyncedAt: session.lastSyncedAt,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    userId: session.userId || null,
+    owner: session.user || session.owner || null,
   };
+}
+
+/**
+ * Verify if the request user is authorized to access a given storeId.
+ * - ADMIN: can access any storeId.
+ * - USER: can only access stores that belong to them (session.userId === req.user.id).
+ * If requestedStoreId is null, falls back to the user's active/latest store.
+ */
+async function resolveAuthorizedStoreId(req, requestedStoreId = null) {
+  const user = req.user;
+
+  if (requestedStoreId) {
+    const session = await prisma.storeSession.findUnique({
+      where: { storeId: String(requestedStoreId) },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+      },
+    });
+
+    if (!session) {
+      return { error: 'Toko tidak ditemukan.', status: 404 };
+    }
+
+    if (user && user.role !== 'ADMIN' && session.userId && session.userId !== user.id) {
+      return { error: 'Akses ditolak: Anda tidak memiliki akses ke toko ini.', status: 403 };
+    }
+
+    return { storeId: session.storeId, session };
+  }
+
+  // Look up user's active session
+  const activeSession = await shopeeService.getActiveSession(null, user);
+  if (!activeSession) {
+    return { storeId: null, session: null };
+  }
+
+  return { storeId: activeSession.storeId, session: activeSession };
 }
 
 async function parseCookie(req, res) {
@@ -48,6 +89,7 @@ async function parseCookie(req, res) {
     });
   }
 
+  // Associate new/updated store with the currently logged-in user
   const session = await shopeeService.saveSession({
     storeName: storeName?.trim() || 'Toko Shopee',
     storeId: analysis.storeId,
@@ -55,9 +97,12 @@ async function parseCookie(req, res) {
     userAgent: req.get('user-agent') || '',
     csrfToken: analysis.csrfToken || null,
     isActive: true,
+    userId: req.user?.id || null,
   });
+
   await configService.setMany({ storeName: session.storeName, cookieString: rawCookie });
-  const sync = await syncService.syncShopee({ origin: 'CONNECT' });
+  const sync = await syncService.syncShopee({ origin: 'CONNECT', storeId: session.storeId });
+
   return res.json({
     success: sync.success,
     analysis: toPublicAnalysis(analysis),
@@ -68,17 +113,145 @@ async function parseCookie(req, res) {
 }
 
 async function getSessionStatus(req, res) {
-  const session = await shopeeService.getActiveSession();
+  const storeId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, storeId);
+
+  if (resolved.error) {
+    return res.status(resolved.status).json({ success: false, error: resolved.error });
+  }
+
+  const [session, allSessions, productCounts] = await Promise.all([
+    shopeeService.getActiveSession(resolved.storeId, req.user),
+    shopeeService.getAllSessions(req.user),
+    prisma.shopeeProduct.groupBy({
+      by: ['storeId'],
+      _count: { shopeeItemId: true },
+    }).catch(() => []),
+  ]);
+
+  const countMap = new Map(productCounts.map((item) => [item.storeId, item._count.shopeeItemId]));
+
+  const stores = allSessions.map((s) => ({
+    ...toPublicSession(s),
+    productCount: countMap.get(s.storeId) || 0,
+  }));
+
   return res.json({
     success: true,
     session: toPublicSession(session) || {
-      storeName: '', storeId: '', cookieConfigured: false, csrfConfigured: false, lastSyncedAt: null,
+      storeName: '',
+      storeId: '',
+      cookieConfigured: false,
+      csrfConfigured: false,
+      lastSyncedAt: null,
+      userId: req.user?.id || null,
     },
+    stores,
+  });
+}
+
+async function getAllStores(req, res) {
+  const [allSessions, productCounts] = await Promise.all([
+    shopeeService.getAllSessions(req.user),
+    prisma.shopeeProduct.groupBy({
+      by: ['storeId'],
+      _count: { shopeeItemId: true },
+    }).catch(() => []),
+  ]);
+
+  const countMap = new Map(productCounts.map((item) => [item.storeId, item._count.shopeeItemId]));
+
+  const stores = allSessions.map((s) => ({
+    ...toPublicSession(s),
+    productCount: countMap.get(s.storeId) || 0,
+  }));
+
+  return res.json({
+    success: true,
+    stores,
+  });
+}
+
+async function setActiveStore(req, res) {
+  const { storeId, isActive = true } = req.body;
+  if (!storeId) {
+    return res.status(400).json({ success: false, error: 'storeId wajib diisi.' });
+  }
+
+  const targetSession = await prisma.storeSession.findUnique({
+    where: { storeId: String(storeId) },
+  });
+
+  if (!targetSession) {
+    return res.status(404).json({ success: false, error: 'Toko tidak ditemukan.' });
+  }
+
+  if (req.user.role !== 'ADMIN' && targetSession.userId && targetSession.userId !== req.user.id) {
+    return res.status(403).json({ success: false, error: 'Akses ditolak: Anda bukan pemilik toko ini.' });
+  }
+
+  const updated = await shopeeService.updateSession(storeId, { isActive: Boolean(isActive) });
+
+  return res.json({
+    success: true,
+    message: `Status toko ${updated.storeName} berhasil diperbarui.`,
+    session: toPublicSession(updated),
+  });
+}
+
+async function deleteStoreSession(req, res) {
+  const { storeId } = req.params;
+  if (!storeId) {
+    return res.status(400).json({ success: false, error: 'storeId wajib diisi.' });
+  }
+
+  const targetSession = await prisma.storeSession.findUnique({
+    where: { storeId: String(storeId) },
+  });
+
+  if (!targetSession) {
+    return res.status(404).json({ success: false, error: 'Toko tidak ditemukan.' });
+  }
+
+  if (req.user.role !== 'ADMIN' && targetSession.userId && targetSession.userId !== req.user.id) {
+    return res.status(403).json({ success: false, error: 'Akses ditolak: Anda bukan pemilik toko ini.' });
+  }
+
+  await shopeeService.deleteSession(storeId);
+  return res.json({
+    success: true,
+    message: 'Sesi toko berhasil dihapus.',
   });
 }
 
 async function getShopeeMetrics(req, res) {
-  const snapshot = await snapshotService.getCatalogSnapshot(req.query);
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const { storeId, session, error, status } = await resolveAuthorizedStoreId(req, reqStoreId);
+
+  if (error) {
+    return res.status(status).json({ success: false, error });
+  }
+
+  if (!storeId) {
+    return res.json({
+      success: true,
+      products: [],
+      filters: { categories: [], total: 0 },
+      pagination: { page: 1, limit: 24, totalPages: 0, totalProducts: 0 },
+      meta: {
+        source: 'SHOPEE_SNAPSHOT',
+        dataAsOf: null,
+        freshness: 'Perlu Koneksi',
+        status: 'Perlu Koneksi',
+        message: 'Silakan hubungkan toko Shopee Anda terlebih dahulu di Pengaturan.',
+      },
+      dataSource: 'EMPTY',
+      dataAsOf: null,
+      message: 'Tidak ada toko aktif yang terhubung untuk akun Anda.',
+    });
+  }
+
+  const snapshot = await snapshotService.getCatalogSnapshot({ ...req.query, storeId });
   return res.json({
     success: true,
     products: snapshot.products,
@@ -92,23 +265,60 @@ async function getShopeeMetrics(req, res) {
 }
 
 async function getProductDetail(req, res) {
-  const snapshot = await snapshotService.getProductSnapshot(req.params.id);
+  const { id } = req.params;
+  const product = await prisma.shopeeProduct.findUnique({
+    where: { shopeeItemId: String(id) },
+  });
+
+  if (!product) {
+    return res.status(404).json({ success: false, message: 'Produk tidak ditemukan pada snapshot katalog.' });
+  }
+
+  if (product.storeId) {
+    const session = await prisma.storeSession.findUnique({
+      where: { storeId: product.storeId },
+    });
+    if (session && req.user.role !== 'ADMIN' && session.userId && session.userId !== req.user.id) {
+      return res.status(403).json({ success: false, error: 'Akses ditolak ke produk toko ini.' });
+    }
+  }
+
+  const snapshot = await snapshotService.getProductSnapshot(id);
   if (!snapshot) return res.status(404).json({ success: false, message: 'Produk tidak ditemukan pada snapshot katalog.' });
   return res.json({ success: true, ...snapshot });
 }
 
 async function updateProductEconomics(req, res) {
   const { id } = req.params;
+  const product = await prisma.shopeeProduct.findUnique({
+    where: { shopeeItemId: String(id) },
+  });
+
+  if (!product) {
+    return res.status(404).json({ success: false, error: 'Produk tidak ditemukan.' });
+  }
+
+  if (product.storeId) {
+    const session = await prisma.storeSession.findUnique({
+      where: { storeId: product.storeId },
+    });
+    if (session && req.user.role !== 'ADMIN' && session.userId && session.userId !== req.user.id) {
+      return res.status(403).json({ success: false, error: 'Akses ditolak untuk mengedit produk toko ini.' });
+    }
+  }
+
   const keys = ['unitCost', 'unitAdCost', 'shippingCost', 'platformFeePercent'];
   const data = Object.fromEntries(keys.filter((key) => req.body[key] !== undefined).map((key) => {
     const value = req.body[key];
     return [key, value === null || value === '' ? null : Number(value)];
   }));
+
   if (Object.values(data).some((value) => value !== null && !Number.isFinite(value))) {
     return res.status(400).json({ success: false, error: 'Nilai ekonomi produk harus berupa angka.' });
   }
-  const product = await prisma.shopeeProduct.update({ where: { shopeeItemId: String(id) }, data });
-  return res.json({ success: true, product });
+
+  const updatedProduct = await prisma.shopeeProduct.update({ where: { shopeeItemId: String(id) }, data });
+  return res.json({ success: true, product: updatedProduct });
 }
 
 async function getShopeeAds(req, res) {
@@ -119,7 +329,44 @@ async function getShopeeAds(req, res) {
     sort_by = 'spend',
     direction = 'desc',
     force_snapshot = 'false',
+    store_id,
+    storeId,
   } = req.query;
+
+  const reqStoreId = store_id || storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+
+  if (resolved.error) {
+    return res.status(resolved.status).json({ success: false, error: resolved.error });
+  }
+
+  const targetStoreId = resolved.storeId;
+
+  if (!targetStoreId) {
+    return res.json({
+      success: true,
+      totalSpend: 0,
+      totalSalesGenerated: 0,
+      roas: 0,
+      impressions: 0,
+      clicks: 0,
+      ctr: 0,
+      voucherSpend: 0,
+      voucherSales: 0,
+      topCampaigns: [],
+      history: [],
+      period,
+      meta: {
+        status: 'Perlu Koneksi',
+        source: 'DATABASE',
+        dataAsOf: null,
+        message: 'Belum ada toko yang terhubung untuk akun Anda.',
+        period,
+      },
+      dataSource: 'EMPTY',
+      dataAsOf: null,
+    });
+  }
 
   const sortBy = sort_by;
   const ascending = direction === 'asc';
@@ -130,6 +377,7 @@ async function getShopeeAds(req, res) {
         period,
         startTime: start_time,
         endTime: end_time,
+        storeId: targetStoreId,
       });
 
       if (liveData.success && liveData.dataSource === 'SHOPEE_API') {
@@ -156,9 +404,8 @@ async function getShopeeAds(req, res) {
           return (leftValue > rightValue ? 1 : -1) * (ascending ? 1 : -1);
         });
 
-        const session = await shopeeService.getActiveSession();
         const dbHistory = await prisma.shopeeAdsData.findMany({
-          where: session?.storeId ? { storeId: session.storeId } : {},
+          where: { storeId: targetStoreId },
           orderBy: { date: 'desc' },
           take: 30,
         });
@@ -214,17 +461,36 @@ async function getShopeeAds(req, res) {
   const snapshot = await snapshotService.getAdsSnapshot({
     sortBy,
     direction,
+    storeId: targetStoreId,
   });
   return res.json({ success: true, ...snapshot, dataSource: snapshot.meta.source, dataAsOf: snapshot.meta.dataAsOf });
 }
 
 async function triggerSync(req, res) {
-  const result = await syncService.syncShopee({ origin: 'MANUAL' });
+  const reqStoreId = req.body.store_id || req.body.storeId || req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+
+  if (resolved.error) {
+    return res.status(resolved.status).json({ success: false, error: resolved.error });
+  }
+
+  if (!resolved.storeId) {
+    return res.status(400).json({ success: false, error: 'Tidak ada toko aktif yang dapat disinkronkan.' });
+  }
+
+  const result = await syncService.syncShopee({ origin: 'MANUAL', storeId: resolved.storeId });
   return res.status(result.success ? 200 : 502).json(result);
 }
 
 async function validateCookie(req, res) {
-  const snapshot = await snapshotService.getCatalogSnapshot({ page: 1, limit: 1 });
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+
+  if (resolved.error) {
+    return res.status(resolved.status).json({ success: false, error: resolved.error });
+  }
+
+  const snapshot = await snapshotService.getCatalogSnapshot({ page: 1, limit: 1, storeId: resolved.storeId });
   return res.json({
     success: true,
     valid: snapshot.meta.status === 'Segar' || snapshot.meta.status === 'Tertunda',
@@ -246,7 +512,29 @@ async function getProductPerformance(req, res) {
       page_num = 1,
       order_type = 'confirmed',
       order_by = 'confirmed_sales.desc',
+      store_id,
+      storeId,
     } = req.query;
+
+    const reqStoreId = store_id || storeId || null;
+    const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+
+    if (resolved.error) {
+      return res.status(resolved.status).json({ success: false, error: resolved.error });
+    }
+
+    const targetStoreId = resolved.storeId;
+
+    if (!targetStoreId) {
+      return res.json({
+        success: true,
+        products: [],
+        total: 0,
+        summary: {},
+        dataSource: 'EMPTY',
+        message: 'Tidak ada toko yang terhubung untuk akun Anda.',
+      });
+    }
 
     const request = {
       period,
@@ -259,11 +547,14 @@ async function getProductPerformance(req, res) {
       pageNum: Number(page_num) || 1,
       orderType: order_type,
       orderBy: order_by,
+      storeId: targetStoreId,
     };
+
     const data = await shopeeService.fetchProductPerformance(request);
     const shouldUseSnapshot = data.dataSource !== 'SHOPEE_API'
       || !data.success
       || (data.total > 0 && !data.products?.length);
+
     if (shouldUseSnapshot) {
       const snapshot = await snapshotService.getProductPerformanceSnapshot(request);
       if (snapshot.total > 0) {
@@ -285,21 +576,45 @@ async function getProductPerformance(req, res) {
 }
 
 async function getTrafficSources(req, res) {
-  // Live read: a store-level breakdown of a moving window, with nothing snapshotted to
-  // keep in step. An outage is reported through `source`, not hidden behind zeros.
-  const result = await shopeeService.fetchTrafficSources({ days: Number(req.query.days) || 7 });
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+
+  if (resolved.error) {
+    return res.status(resolved.status).json({ success: false, error: resolved.error });
+  }
+
+  if (!resolved.storeId) {
+    return res.json({
+      success: true,
+      source: 'EMPTY',
+      sources: [],
+      message: 'Tidak ada toko terhubung.',
+    });
+  }
+
+  const result = await shopeeService.fetchTrafficSources({
+    days: Number(req.query.days) || 7,
+    storeId: resolved.storeId,
+  });
+
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
 }
 
-module.exports = wrapHandlers({
-  parseCookie,
-  getSessionStatus,
-  getShopeeMetrics,
-  getProductDetail,
-  updateProductEconomics,
-  getShopeeAds,
-  getProductPerformance,
-  getTrafficSources,
-  triggerSync,
-  validateCookie,
-});
+module.exports = {
+  ...wrapHandlers({
+    parseCookie,
+    getSessionStatus,
+    getAllStores,
+    setActiveStore,
+    deleteStoreSession,
+    getShopeeMetrics,
+    getProductDetail,
+    updateProductEconomics,
+    getShopeeAds,
+    getProductPerformance,
+    getTrafficSources,
+    triggerSync,
+    validateCookie,
+  }),
+  resolveAuthorizedStoreId,
+};

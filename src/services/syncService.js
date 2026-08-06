@@ -259,16 +259,11 @@ class SyncService {
    *
    * Hari yang sudah punya baris dilewati kecuali `overwrite: true`.
    */
-  async backfillAdsHistory({ days = 30, overwrite = false } = {}) {
-    const session = await shopeeService.getActiveSession();
-    if (!session?.storeId) {
-      return { success: false, filled: 0, skipped: 0, failed: 0, message: 'Tidak ada sesi Shopee aktif.' };
-    }
-
+  async backfillAdsHistorySingleStore(storeId, { days = 30, overwrite = false } = {}) {
     const safeDays = Math.min(90, Math.max(1, Number(days) || 30));
     const existing = new Set(
       overwrite ? [] : (await prisma.shopeeAdsData.findMany({
-        where: { storeId: session.storeId },
+        where: { storeId },
         select: { date: true },
       })).map((row) => row.date)
     );
@@ -282,13 +277,12 @@ class SyncService {
         continue;
       }
 
-      // Batas hari mengikuti Asia/Jakarta, sama seperti seluruh kunci tanggal di aplikasi.
       const [year, month, day] = dateKey.split('-').map(Number);
       const startTime = Math.floor(Date.UTC(year, month - 1, day, -7, 0, 0) / 1000);
       const endTime = startTime + 86399;
 
       try {
-        const metrics = await shopeeService.fetchShopeeAdsMetrics({ period: 'custom', startTime, endTime });
+        const metrics = await shopeeService.fetchShopeeAdsMetrics({ period: 'custom', startTime, endTime, storeId });
         if (!metrics?.success) {
           results.failed += 1;
           continue;
@@ -297,14 +291,43 @@ class SyncService {
         results.filled += 1;
         results.dates.push(dateKey);
       } catch (err) {
-        console.warn(`[Sync] Backfill iklan ${dateKey} gagal:`, err.message);
+        console.warn(`[Sync] Backfill iklan ${dateKey} (${storeId}) gagal:`, err.message);
         results.failed += 1;
       }
     }
 
-    const message = `Riwayat iklan: ${results.filled} hari terisi, ${results.skipped} dilewati (sudah ada), ${results.failed} gagal.`;
+    const message = `[${storeId}] Riwayat iklan: ${results.filled} hari terisi, ${results.skipped} dilewati (sudah ada), ${results.failed} gagal.`;
     await this.writeLog('ADS_BACKFILL', results.failed && !results.filled ? 'FAILED' : 'SUCCESS', message);
-    return { success: true, ...results, message };
+    return { success: true, storeId, ...results, message };
+  }
+
+  async backfillAdsHistory({ days = 30, overwrite = false, storeId = null } = {}) {
+    if (storeId) {
+      return this.backfillAdsHistorySingleStore(storeId, { days, overwrite });
+    }
+    const allSessions = await shopeeService.getAllSessions();
+    const activeSessions = allSessions.filter((s) => s.isActive);
+    if (!activeSessions.length) {
+      const fallback = await shopeeService.getActiveSession();
+      if (fallback?.storeId) {
+        return this.backfillAdsHistorySingleStore(fallback.storeId, { days, overwrite });
+      }
+      return { success: false, filled: 0, skipped: 0, failed: 0, message: 'Tidak ada sesi Shopee aktif.' };
+    }
+
+    const results = [];
+    for (const session of activeSessions) {
+      const res = await this.backfillAdsHistorySingleStore(session.storeId, { days, overwrite });
+      results.push(res);
+    }
+    return {
+      success: true,
+      storeResults: results,
+      filled: results.reduce((acc, r) => acc + (r.filled || 0), 0),
+      skipped: results.reduce((acc, r) => acc + (r.skipped || 0), 0),
+      failed: results.reduce((acc, r) => acc + (r.failed || 0), 0),
+      message: `Backfill iklan untuk ${activeSessions.length} toko selesai.`,
+    };
   }
 
   async persistWarehouseSnapshots(items, source) {
@@ -405,60 +428,127 @@ class SyncService {
     return persistable.length;
   }
 
-  async syncShopee({ origin = 'MANUAL' } = {}) {
+  async syncShopeeSingleStore(storeId, origin = 'MANUAL') {
     const timestamp = new Date();
     try {
-      const metrics = await shopeeService.fetchLiveShopeeMetrics();
+      const metrics = await shopeeService.fetchLiveShopeeMetrics('', storeId);
       if (!metrics.isRealDataActive) {
-        await this.writeLog('SHOPEE_SYNC', 'FAILED', metrics.message || 'Sinkronisasi katalog Shopee gagal.', timestamp);
-        return { success: false, source: 'Shopee', status: 'Gagal', message: metrics.message, origin };
+        await this.writeLog('SHOPEE_SYNC', 'FAILED', `[${storeId}] ${metrics.message || 'Sinkronisasi katalog Shopee gagal.'}`, timestamp);
+        return { success: false, storeId, source: 'Shopee', status: 'Gagal', message: metrics.message, origin };
       }
-      const intelligence = await shopeeInsightsService.getMarketplaceInsights();
+      const intelligence = await shopeeInsightsService.getMarketplaceInsights({ storeId });
       const metricCount = intelligence.source === 'SHOPEE_API'
         ? await this.persistProductMetrics(metrics.storeId, intelligence.productPerformance)
         : 0;
       // Secondary to the catalog, so its failure must not fail the job (constraint 9).
-      const orderSummary = await shopeeService.syncOrderSummaryHistory({ days: 30 }).catch((err) => {
-        console.warn('[Sync] Order summary history unavailable:', err.message);
+      const orderSummary = await shopeeService.syncOrderSummaryHistory({ days: 30, storeId }).catch((err) => {
+        console.warn(`[Sync] Order summary history unavailable for ${storeId}:`, err.message);
         return { source: 'EMPTY', persisted: 0, message: err.message };
       });
       // Juga sekunder: hanya menyentuh produk yang kategorinya masih kosong, jadi setelah
       // katalog terisi penuh langkah ini praktis tidak berbiaya.
-      const categories = await shopeeService.enrichMissingCategories().catch((err) => {
-        console.warn('[Sync] Category enrichment unavailable:', err.message);
+      const categories = await shopeeService.enrichMissingCategories(storeId).catch((err) => {
+        console.warn(`[Sync] Category enrichment unavailable for ${storeId}:`, err.message);
         return { updated: 0, attempted: 0 };
       });
       const orderPart = orderSummary.persisted
         ? ` ${orderSummary.persisted} hari ringkasan pesanan tersimpan.`
         : ` Ringkasan pesanan belum tersimpan: ${orderSummary.message || 'sumber tidak tersedia.'}`;
       const categoryPart = categories.updated ? ` ${categories.updated} kategori produk dilengkapi.` : '';
-      const message = (metricCount
+      const storeLabel = metrics.storeName ? `[${metrics.storeName}] ` : `[${metrics.storeId}] `;
+      const message = storeLabel + (metricCount
         ? `Katalog disinkronkan bersama ${metricCount} snapshot performa produk.`
         : 'Katalog disinkronkan. Snapshot performa produk belum tersedia dari Seller Center.') + orderPart + categoryPart;
       await this.writeLog('SHOPEE_SYNC', intelligence.source === 'SHOPEE_API' ? 'SUCCESS' : 'DEGRADED', message, timestamp);
-      return { success: true, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, orderSummaryDays: orderSummary.persisted, categoriesUpdated: categories.updated, origin };
+      return { success: true, storeId: metrics.storeId, storeName: metrics.storeName, source: 'Shopee', status: intelligence.source === 'SHOPEE_API' ? 'Segar' : 'Tertunda', message, productCount: metrics.products.length, metricCount, orderSummaryDays: orderSummary.persisted, categoriesUpdated: categories.updated, origin };
     } catch (err) {
-      await this.writeLog('SHOPEE_SYNC', 'FAILED', err.message, timestamp);
-      return { success: false, source: 'Shopee', status: 'Gagal', message: 'Sinkronisasi Shopee gagal.', origin };
+      await this.writeLog('SHOPEE_SYNC', 'FAILED', `[${storeId}] ${err.message}`, timestamp);
+      return { success: false, storeId, source: 'Shopee', status: 'Gagal', message: `Sinkronisasi Shopee gagal: ${err.message}`, origin };
     }
   }
 
-  async syncAds({ origin = 'MANUAL' } = {}) {
+  async syncShopee({ origin = 'MANUAL', storeId = null } = {}) {
+    if (storeId) {
+      return this.syncShopeeSingleStore(storeId, origin);
+    }
+    const allSessions = await shopeeService.getAllSessions();
+    const activeSessions = allSessions.filter((s) => s.isActive);
+    if (!activeSessions.length) {
+      const fallback = await shopeeService.getActiveSession();
+      if (fallback?.storeId) {
+        return this.syncShopeeSingleStore(fallback.storeId, origin);
+      }
+      return { success: false, source: 'Shopee', status: 'Gagal', message: 'Tidak ada sesi toko Shopee yang aktif.', origin };
+    }
+
+    const results = [];
+    for (const session of activeSessions) {
+      const res = await this.syncShopeeSingleStore(session.storeId, origin);
+      results.push(res);
+    }
+    const successCount = results.filter((r) => r.success).length;
+    const totalProducts = results.reduce((acc, r) => acc + (r.productCount || 0), 0);
+    const message = `${successCount}/${activeSessions.length} toko Shopee berhasil disinkronkan (${totalProducts} produk).`;
+    return {
+      success: successCount > 0,
+      source: 'Shopee',
+      status: successCount === activeSessions.length ? 'Segar' : (successCount ? 'Tertunda' : 'Gagal'),
+      message,
+      storeResults: results,
+      productCount: totalProducts,
+      origin,
+    };
+  }
+
+  async syncAdsSingleStore(storeId, origin = 'MANUAL') {
     const timestamp = new Date();
     try {
-      const metrics = await shopeeService.fetchShopeeAdsMetrics();
+      const metrics = await shopeeService.fetchShopeeAdsMetrics({ storeId });
       if (!metrics.success) {
-        await this.writeLog('ADS_SYNC', 'FAILED', metrics.message || 'Sinkronisasi iklan gagal.', timestamp);
-        return { success: false, source: 'Iklan Shopee', status: 'Gagal', message: metrics.message, origin };
+        await this.writeLog('ADS_SYNC', 'FAILED', `[${storeId}] ${metrics.message || 'Sinkronisasi iklan gagal.'}`, timestamp);
+        return { success: false, storeId, source: 'Iklan Shopee', status: 'Gagal', message: metrics.message, origin };
       }
       const result = await this.persistAdsSnapshot(metrics);
-      const message = `${result.campaignCount} kampanye iklan disinkronkan. Nilai nominal dinormalisasi dengan pembagi ${metrics.amountDivisor}.`;
+      const message = `[${storeId}] ${result.campaignCount} kampanye iklan disinkronkan. Nilai nominal dinormalisasi dengan pembagi ${metrics.amountDivisor}.`;
       await this.writeLog('ADS_SYNC', 'SUCCESS', message, timestamp);
-      return { success: true, source: 'Iklan Shopee', status: 'Segar', message, campaignCount: result.campaignCount, origin };
+      return { success: true, storeId, source: 'Iklan Shopee', status: 'Segar', message, campaignCount: result.campaignCount, origin };
     } catch (err) {
-      await this.writeLog('ADS_SYNC', 'FAILED', err.message, timestamp);
-      return { success: false, source: 'Iklan Shopee', status: 'Gagal', message: 'Sinkronisasi iklan gagal.', origin };
+      await this.writeLog('ADS_SYNC', 'FAILED', `[${storeId}] ${err.message}`, timestamp);
+      return { success: false, storeId, source: 'Iklan Shopee', status: 'Gagal', message: `Sinkronisasi iklan gagal: ${err.message}`, origin };
     }
+  }
+
+  async syncAds({ origin = 'MANUAL', storeId = null } = {}) {
+    if (storeId) {
+      return this.syncAdsSingleStore(storeId, origin);
+    }
+    const allSessions = await shopeeService.getAllSessions();
+    const activeSessions = allSessions.filter((s) => s.isActive);
+    if (!activeSessions.length) {
+      const fallback = await shopeeService.getActiveSession();
+      if (fallback?.storeId) {
+        return this.syncAdsSingleStore(fallback.storeId, origin);
+      }
+      return { success: false, source: 'Iklan Shopee', status: 'Gagal', message: 'Tidak ada sesi toko Shopee yang aktif.', origin };
+    }
+
+    const results = [];
+    for (const session of activeSessions) {
+      const res = await this.syncAdsSingleStore(session.storeId, origin);
+      results.push(res);
+    }
+    const successCount = results.filter((r) => r.success).length;
+    const totalCampaigns = results.reduce((acc, r) => acc + (r.campaignCount || 0), 0);
+    const message = `${successCount}/${activeSessions.length} toko iklan berhasil disinkronkan (${totalCampaigns} kampanye).`;
+    return {
+      success: successCount > 0,
+      source: 'Iklan Shopee',
+      status: successCount === activeSessions.length ? 'Segar' : (successCount ? 'Tertunda' : 'Gagal'),
+      message,
+      storeResults: results,
+      campaignCount: totalCampaigns,
+      origin,
+    };
   }
 
   async syncWarehouse({ origin = 'MANUAL', skipLock = false } = {}) {
@@ -503,11 +593,11 @@ class SyncService {
     }
   }
 
-  async syncAll({ origin = 'MANUAL' } = {}) {
+  async syncAll({ origin = 'MANUAL', storeId = null } = {}) {
     const locked = await syncLockService.runExclusive(async () => {
       const startedAt = new Date();
-      const shopee = await this.syncShopee({ origin });
-      const ads = await this.syncAds({ origin });
+      const shopee = await this.syncShopee({ origin, storeId });
+      const ads = await this.syncAds({ origin, storeId });
       const warehouse = await this.syncWarehouse({ origin, skipLock: true });
       const results = [shopee, ads, warehouse];
       const successCount = results.filter((result) => result.success).length;

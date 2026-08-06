@@ -219,11 +219,55 @@ class ShopeeService {
     console.log(`[Shopee Service] Active store cookie ${activeCookie ? 'updated' : 'cleared'}.`);
   }
 
-  async getActiveSession() {
-    const session = await prisma.storeSession.findFirst({
-      where: { isActive: true },
+  async getActiveSession(storeId = null, user = null) {
+    if (storeId) {
+      const specific = await prisma.storeSession.findUnique({
+        where: { storeId: String(storeId) },
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, role: true },
+          },
+        },
+      });
+      if (specific) {
+        // Enforce user ownership if user is non-admin
+        if (user && user.role !== 'ADMIN' && specific.userId && specific.userId !== user.id) {
+          return null;
+        }
+        if (specific.cookieString && !activeCookie) {
+          activeCookie = specific.cookieString;
+        }
+        return specific;
+      }
+    }
+
+    const where = { isActive: true };
+    if (user && user.role !== 'ADMIN') {
+      where.userId = user.id;
+    }
+
+    let session = await prisma.storeSession.findFirst({
+      where,
       orderBy: { updatedAt: 'desc' },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+      },
     });
+
+    if (!session && user && user.role !== 'ADMIN') {
+      // Fallback: search for any store belonging to user even if inactive
+      session = await prisma.storeSession.findFirst({
+        where: { userId: user.id },
+        orderBy: { updatedAt: 'desc' },
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, role: true },
+          },
+        },
+      });
+    }
 
     if (session?.cookieString && !activeCookie) {
       activeCookie = session.cookieString;
@@ -232,9 +276,92 @@ class ShopeeService {
     return session;
   }
 
-  async saveSession({ storeName, storeId, cookieString, userAgent, csrfToken, isActive = true }) {
-    await prisma.storeSession.updateMany({ data: { isActive: false } });
+  async getAllSessions(user = null) {
+    const where = {};
+    if (user && user.role !== 'ADMIN') {
+      where.userId = user.id;
+    }
 
+    const sessions = await prisma.storeSession.findMany({
+      where,
+      orderBy: [{ isActive: 'desc' }, { updatedAt: 'desc' }],
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+      },
+    });
+
+    const counts = await prisma.shopeeProduct.groupBy({
+      by: ['storeId'],
+      _count: { shopeeItemId: true },
+    });
+    const countByStore = new Map(counts.map((c) => [c.storeId, c._count.shopeeItemId]));
+
+    return sessions.map((session) => ({
+      ...session,
+      owner: session.user || null,
+      productCount: countByStore.get(session.storeId) || 0,
+      cookieConfigured: Boolean(session.cookieString),
+      csrfConfigured: Boolean(session.csrfToken),
+    }));
+  }
+
+  async getSessionById(storeId, user = null) {
+    if (!storeId) return null;
+    const session = await prisma.storeSession.findUnique({
+      where: { storeId: String(storeId) },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true },
+        },
+      },
+    });
+    if (session && user && user.role !== 'ADMIN' && session.userId && session.userId !== user.id) {
+      return null;
+    }
+    return session;
+  }
+
+  async updateSession(storeId, updates = {}) {
+    if (!storeId) throw new Error('storeId wajib disertakan.');
+    const allowed = ['storeName', 'cookieString', 'userAgent', 'csrfToken', 'isActive', 'userId'];
+    const data = {};
+    for (const key of allowed) {
+      if (updates[key] !== undefined) data[key] = updates[key];
+    }
+    if (updates.cookieString) {
+      const csrf = extractCsrfFromCookie(updates.cookieString);
+      if (csrf) data.csrfToken = csrf;
+    }
+
+    return prisma.storeSession.update({
+      where: { storeId: String(storeId) },
+      data,
+    });
+  }
+
+  async deleteSession(storeId, deleteProducts = true) {
+    if (!storeId) throw new Error('storeId wajib disertakan.');
+    const id = String(storeId);
+
+    if (deleteProducts) {
+      await prisma.$transaction([
+        prisma.shopeeListingVariation.deleteMany({ where: { storeId: id } }),
+        prisma.shopeeProduct.deleteMany({ where: { storeId: id } }),
+        prisma.shopeeOrderSummary.deleteMany({ where: { storeId: id } }),
+        prisma.shopeeAdsCampaignSnapshot.deleteMany({ where: { storeId: id } }),
+        prisma.shopeeAdsData.deleteMany({ where: { storeId: id } }),
+        prisma.productMetricSnapshot.deleteMany({ where: { storeId: id } }),
+        prisma.storeSession.delete({ where: { storeId: id } }),
+      ]);
+    } else {
+      await prisma.storeSession.delete({ where: { storeId: id } });
+    }
+    return { success: true, storeId: id };
+  }
+
+  async saveSession({ storeName, storeId, cookieString, userAgent, csrfToken, isActive = true, userId = null }) {
     const session = await prisma.storeSession.upsert({
       where: { storeId },
       update: {
@@ -244,6 +371,7 @@ class ShopeeService {
         csrfToken,
         isActive,
         lastSyncedAt: new Date(),
+        ...(userId ? { userId } : {}),
       },
       create: {
         storeName,
@@ -252,6 +380,12 @@ class ShopeeService {
         userAgent,
         csrfToken,
         isActive,
+        ...(userId ? { userId } : {}),
+      },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, role: true },
+        },
       },
     });
 
@@ -426,8 +560,8 @@ class ShopeeService {
    * membanjiri Seller Center. Sekali terisi, produk itu tidak diambil lagi pada sync
    * berikutnya.
    */
-  async enrichMissingCategories({ limit = 200, concurrency = 4 } = {}) {
-    const session = await this.getActiveSession();
+  async enrichMissingCategories({ limit = 200, concurrency = 4, storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
     if (!session?.storeId) return { updated: 0, attempted: 0, message: 'Tidak ada sesi toko aktif.' };
 
     const pending = await prisma.shopeeProduct.findMany({
@@ -523,9 +657,9 @@ class ShopeeService {
   /**
    * Fetches real-time key metrics for today (GMV, orders, conversion rate, AOV).
    */
-  async fetchOrderSummaryRealtime({ cookie: customCookie = '' } = {}) {
-    const session = await this.getActiveSession();
-    const cookie = customCookie || activeCookie || session?.cookieString || '';
+  async fetchOrderSummaryRealtime({ cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', row: null, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
@@ -585,9 +719,9 @@ class ShopeeService {
     }
   }
 
-  async fetchOrderSummaryHistory({ days = 30, includeToday = true, cookie: customCookie = '' } = {}) {
-    const session = await this.getActiveSession();
-    const cookie = customCookie || activeCookie || session?.cookieString || '';
+  async fetchOrderSummaryHistory({ days = 30, includeToday = true, cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', rows: [], message: 'Simpan cookie Shopee yang valid di Pengaturan sebelum mengambil ringkasan pesanan.' };
@@ -619,7 +753,7 @@ class ShopeeService {
         const todayKey = getJakartaDateKey(new Date());
         const alreadyHasToday = rows.some((r) => r.date === todayKey);
         if (!alreadyHasToday) {
-          const realtimeRes = await this.fetchOrderSummaryRealtime({ cookie }).catch(() => null);
+          const realtimeRes = await this.fetchOrderSummaryRealtime({ cookie, storeId }).catch(() => null);
           if (realtimeRes?.row) {
             rows.push(realtimeRes.row);
             rows.sort((left, right) => left.date.localeCompare(right.date));
@@ -683,9 +817,9 @@ class ShopeeService {
    * it does not publish the denominator it uses for a cancellation *rate*, so none is
    * derived here — the figures stay as measured.
    */
-  async fetchOrderPerformanceHistory({ days = 30, cookie: customCookie = '' } = {}) {
-    const session = await this.getActiveSession();
-    const cookie = customCookie || activeCookie || session?.cookieString || '';
+  async fetchOrderPerformanceHistory({ days = 30, cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) return { source: 'EMPTY', rows: [], message: 'Sesi Shopee tidak tersedia.' };
 
@@ -750,9 +884,9 @@ class ShopeeService {
    * Ratios are Shopee's own — they are not recomputed here, and they do not sum to 1:
    * paid ads overlap the organic channels.
    */
-  async fetchTrafficSources({ days = 7 } = {}) {
-    const session = await this.getActiveSession();
-    const cookie = activeCookie || session?.cookieString || '';
+  async fetchTrafficSources({ days = 7, storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', channels: [], message: 'Simpan cookie Shopee yang valid di Pengaturan untuk melihat sumber kunjungan.' };
@@ -842,16 +976,16 @@ class ShopeeService {
     return written;
   }
 
-  async syncOrderSummaryHistory({ days = 30 } = {}) {
-    const session = await this.getActiveSession();
+  async syncOrderSummaryHistory({ days = 30, storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
     if (!session?.storeId) {
       return { source: 'EMPTY', persisted: 0, message: 'Tidak ada sesi toko aktif untuk menyimpan ringkasan pesanan.' };
     }
     const [summary, performance] = await Promise.all([
-      this.fetchOrderSummaryHistory({ days }),
+      this.fetchOrderSummaryHistory({ days, storeId: session.storeId }),
       // Secondary to the GMV series: a failure here must leave the summary intact, so the
       // days simply keep their existing (possibly null) cancellation figures.
-      this.fetchOrderPerformanceHistory({ days }).catch((err) => ({ source: 'EMPTY', rows: [], message: err.message })),
+      this.fetchOrderPerformanceHistory({ days, storeId: session.storeId }).catch((err) => ({ source: 'EMPTY', rows: [], message: err.message })),
     ]);
 
     const performanceByDate = new Map(performance.rows.map((row) => [row.date, row]));
@@ -867,9 +1001,9 @@ class ShopeeService {
     };
   }
 
-  async fetchLiveShopeeMetrics(customCookie = '') {
-    const session = await this.getActiveSession();
-    const cookie = customCookie || activeCookie || session?.cookieString || '';
+  async fetchLiveShopeeMetrics(customCookie = '', storeId = null) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
 
     if (!cookie) {
       return emptyShopeeState();
@@ -1057,8 +1191,8 @@ class ShopeeService {
     return product || null;
   }
 
-  async fetchShopeeAdsMetrics({ period = 'real_time', startTime: customStart, endTime: customEnd } = {}) {
-    const session = await this.getActiveSession();
+  async fetchShopeeAdsMetrics({ period = 'real_time', startTime: customStart, endTime: customEnd, storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
     if (!session?.cookieString || !session?.storeId) {
       return {
         success: false,
@@ -1185,8 +1319,9 @@ class ShopeeService {
     pageNum = 1,
     orderType = 'confirmed',
     orderBy = 'confirmed_sales.desc',
+    storeId = null,
   } = {}) {
-    const session = await this.getActiveSession();
+    const session = await this.getActiveSession(storeId);
     const timeRange = getPeriodTimeRange(period, customStart, customEnd);
 
     if (!session?.cookieString || !session?.storeId) {

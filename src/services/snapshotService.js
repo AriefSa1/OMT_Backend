@@ -116,9 +116,11 @@ function getLatestBy(items, key) {
 }
 
 class SnapshotService {
-  async getContext() {
+  async getContext(storeId = null) {
     const [session, latestShopeeLog, latestAdsLog, latestWarehouseLog, configRows] = await Promise.all([
-      prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } }),
+      storeId
+        ? prisma.storeSession.findUnique({ where: { storeId } })
+        : prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } }),
       prisma.syncJobLog.findFirst({ where: { jobType: 'SHOPEE_SYNC' }, orderBy: { timestamp: 'desc' } }),
       prisma.syncJobLog.findFirst({ where: { jobType: 'ADS_SYNC' }, orderBy: { timestamp: 'desc' } }),
       prisma.syncJobLog.findFirst({ where: { jobType: 'WAREHOUSE_SYNC' }, orderBy: { timestamp: 'desc' } }),
@@ -137,11 +139,12 @@ class SnapshotService {
     return { session, latestShopeeLog, latestAdsLog, latestWarehouseLog, warehouseConfigured };
   }
 
-  async getCatalogSnapshot({ page = 1, limit = 24, search = '', category = '', sort = 'updatedAt', direction = 'desc' } = {}) {
-    const { session, latestShopeeLog } = await this.getContext();
+  async getCatalogSnapshot({ page = 1, limit = 24, search = '', category = '', sort = 'updatedAt', direction = 'desc', storeId = null } = {}) {
+    const { session, latestShopeeLog } = await this.getContext(storeId);
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
-    const storeWhere = session?.storeId ? { storeId: session.storeId } : {};
+    const targetStoreId = storeId || session?.storeId;
+    const storeWhere = targetStoreId ? { storeId: targetStoreId } : {};
     const searchTerm = String(search || '').trim();
     const selectedCategory = String(category || '').trim();
     const where = {
@@ -257,8 +260,11 @@ class SnapshotService {
     pageSize = 10,
     pageNum = 1,
     orderBy = 'confirmed_sales.desc',
+    storeId = null,
   } = {}) {
-    const session = await prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } });
+    const session = storeId
+      ? await prisma.storeSession.findUnique({ where: { storeId } })
+      : await prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } });
     const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 10));
     const safePageNum = Math.max(1, Number(pageNum) || 1);
     const endDate = dateKey();
@@ -477,9 +483,10 @@ class SnapshotService {
     };
   }
 
-  async getAdsSnapshot({ sortBy = 'spend', direction = 'desc' } = {}) {
-    const { session, latestAdsLog } = await this.getContext();
-    const where = session?.storeId ? { storeId: session.storeId } : {};
+  async getAdsSnapshot({ sortBy = 'spend', direction = 'desc', storeId = null } = {}) {
+    const { session, latestAdsLog } = await this.getContext(storeId);
+    const targetStoreId = storeId || session?.storeId;
+    const where = targetStoreId ? { storeId: targetStoreId } : {};
     const [latest, rows] = await Promise.all([
       // The business date is the authoritative snapshot key. Sorting only by
       // SQLite DateTime can select an older day when timestamps were migrated.
@@ -967,18 +974,18 @@ class SnapshotService {
     };
   }
 
-  async getDashboardOverview() {
+  async getDashboardOverview(storeId = null) {
     const shopeeService = require('./shopeeService');
     const syncService = require('./syncService');
-    const session = await shopeeService.getActiveSession();
+    const session = await shopeeService.getActiveSession(storeId);
 
     if (session?.isActive && session?.storeId) {
       try {
         await Promise.allSettled([
-          shopeeService.fetchShopeeAdsMetrics({ period: 'real_time' }).then((liveAds) => {
+          shopeeService.fetchShopeeAdsMetrics({ period: 'real_time', storeId: session.storeId }).then((liveAds) => {
             if (liveAds?.success) syncService.persistAdsSnapshot(liveAds).catch(() => {});
           }),
-          shopeeService.fetchOrderSummaryRealtime().then(async (realtimeOrders) => {
+          shopeeService.fetchOrderSummaryRealtime(session.storeId).then(async (realtimeOrders) => {
             if (realtimeOrders?.row) {
               await shopeeService.persistOrderSummaryHistory(session.storeId, [realtimeOrders.row]);
             }
@@ -990,12 +997,12 @@ class SnapshotService {
     }
 
     const [context, catalog, ads, warehouse, orders] = await Promise.all([
-      this.getContext(),
-      this.getCatalogSnapshot({ page: 1, limit: 8, sort: 'salesCount' }),
-      this.getAdsSnapshot(),
+      this.getContext(session?.storeId || storeId),
+      this.getCatalogSnapshot({ page: 1, limit: 8, sort: 'salesCount', storeId: session?.storeId || storeId }),
+      this.getAdsSnapshot({ storeId: session?.storeId || storeId }),
       this.getWarehouseSnapshot({ page: 1, limit: 8 }),
       prisma.shopeeOrderSummary.findMany({
-        where: session?.storeId ? { storeId: session.storeId } : {},
+        where: session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {}),
         orderBy: { date: 'desc' },
         take: 30,
       }),

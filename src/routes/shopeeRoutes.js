@@ -3,6 +3,9 @@ const authMiddleware = require('../middleware/authMiddleware');
 const {
   parseCookie,
   getSessionStatus,
+  getAllStores,
+  setActiveStore,
+  deleteStoreSession,
   getShopeeMetrics,
   getProductDetail,
   updateProductEconomics,
@@ -10,7 +13,7 @@ const {
   getProductPerformance,
   getTrafficSources,
   triggerSync,
-  validateCookie
+  validateCookie,
 } = require('../controllers/shopeeController');
 
 const router = express.Router();
@@ -19,6 +22,9 @@ router.use(authMiddleware);
 
 router.post('/cookie', parseCookie);
 router.get('/session', getSessionStatus);
+router.get('/stores', getAllStores);
+router.post('/stores/active', setActiveStore);
+router.delete('/stores/:storeId', deleteStoreSession);
 router.get('/metrics', getShopeeMetrics);
 router.get('/product/:id', getProductDetail);
 router.put('/product/:id/economics', updateProductEconomics);

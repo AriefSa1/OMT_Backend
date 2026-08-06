@@ -58,4 +58,31 @@ async function authMiddleware(req, res, next) {
   }
 }
 
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'ADMIN') {
+    return res.status(403).json({
+      success: false,
+      error: 'Akses ditolak: Hanya administrator yang dapat mengakses fungsi ini.'
+    });
+  }
+  return next();
+}
+
+function requireRoles(allowedRoles = []) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        error: `Akses ditolak: Memerlukan peran ${allowedRoles.join(' atau ')}.`
+      });
+    }
+    return next();
+  };
+}
+
+authMiddleware.authMiddleware = authMiddleware;
+authMiddleware.requireAdmin = requireAdmin;
+authMiddleware.requireRoles = requireRoles;
+
 module.exports = authMiddleware;
+

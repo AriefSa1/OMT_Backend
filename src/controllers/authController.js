@@ -20,27 +20,74 @@ function generateToken(user) {
 async function register(req, res) {
   try {
     const { name, email, password } = req.body;
+    const providedSecret = String(
+      req.headers['x-registration-secret'] ||
+      req.body?.registrationSecret ||
+      req.body?.code ||
+      ''
+    ).trim();
 
-    // Kontrol akses registrasi. Aplikasi ini terdeploy publik di 94media.art dan datanya
-    // adalah angka penjualan/gudang nyata satu toko — registrasi terbuka berarti siapa pun
-    // yang menemukan URL-nya bisa membuat akun dan melihat semuanya. Aturannya:
-    //
-    // - Bila belum ada user sama sekali (deploy baru), izinkan satu pendaftaran pertama
-    //   sebagai bootstrap admin, tanpa kode. Ini menghindari masalah "ayam dan telur".
-    // - Selain itu, wajib kode undangan yang cocok dengan REGISTRATION_SECRET (dikirim
-    //   lewat header x-registration-secret atau field registrationSecret).
-    // - Bila REGISTRATION_SECRET tidak diset dan sudah ada user, registrasi ditutup total;
-    //   tambah user lewat manage_admin.js. Gagal-tertutup, bukan gagal-terbuka.
     const userCount = await prisma.user.count();
     const isBootstrap = userCount === 0;
-    if (!isBootstrap) {
-      const configuredSecret = (process.env.REGISTRATION_SECRET || '').trim();
-      const providedSecret = String(req.headers['x-registration-secret'] || req.body?.registrationSecret || '').trim();
-      if (!configuredSecret) {
-        return res.status(403).json({ success: false, error: 'Pendaftaran mandiri dinonaktifkan. Hubungi administrator.' });
+    let assignedRole = 'USER';
+    let matchedRegistrationCode = null;
+
+    if (isBootstrap) {
+      // User pertama otomatis menjadi ADMIN
+      assignedRole = 'ADMIN';
+    } else {
+      if (!providedSecret) {
+        return res.status(403).json({
+          success: false,
+          error: 'Kode undangan/registrasi diperlukan untuk membuat akun. Hubungi administrator.'
+        });
       }
-      if (providedSecret !== configuredSecret) {
-        return res.status(403).json({ success: false, error: 'Kode undangan tidak valid.' });
+
+      // 1. Cek database tabel RegistrationCode
+      const codeRecord = await prisma.registrationCode.findFirst({
+        where: {
+          code: {
+            equals: providedSecret,
+            mode: 'insensitive'
+          }
+        }
+      });
+
+      if (codeRecord) {
+        if (!codeRecord.isActive) {
+          return res.status(403).json({
+            success: false,
+            error: 'Kode registrasi ini telah dinonaktifkan oleh administrator.'
+          });
+        }
+
+        if (codeRecord.expiresAt && new Date() > new Date(codeRecord.expiresAt)) {
+          return res.status(403).json({
+            success: false,
+            error: 'Kode registrasi ini telah kedaluwarsa.'
+          });
+        }
+
+        if (codeRecord.maxUses > 0 && codeRecord.usedCount >= codeRecord.maxUses) {
+          return res.status(403).json({
+            success: false,
+            error: 'Batas kuota penggunaan kode registrasi ini telah habis.'
+          });
+        }
+
+        matchedRegistrationCode = codeRecord;
+        assignedRole = codeRecord.role === 'ADMIN' ? 'ADMIN' : 'USER';
+      } else {
+        // 2. Fallback ke process.env.REGISTRATION_SECRET jika dikonfigurasi
+        const configuredSecret = (process.env.REGISTRATION_SECRET || '').trim();
+        if (configuredSecret && providedSecret === configuredSecret) {
+          assignedRole = 'USER';
+        } else {
+          return res.status(403).json({
+            success: false,
+            error: 'Kode registrasi / undangan tidak valid atau tidak ditemukan.'
+          });
+        }
       }
     }
 
@@ -74,10 +121,41 @@ async function register(req, res) {
         name: name.trim(),
         email: normalizedEmail,
         password: hashedPassword,
-        // User pertama (bootstrap) menjadi ADMIN supaya selalu ada pemilik; sisanya ANALYST.
-        role: isBootstrap ? 'ADMIN' : 'ANALYST'
+        role: assignedRole
       }
     });
+
+    // Update penggunaan kode registrasi bila menggunakan RegistrationCode dari database
+    if (matchedRegistrationCode) {
+      const nextUsedCount = matchedRegistrationCode.usedCount + 1;
+      const shouldDeactivate = matchedRegistrationCode.maxUses > 0 && nextUsedCount >= matchedRegistrationCode.maxUses;
+
+      await prisma.registrationCode.update({
+        where: { id: matchedRegistrationCode.id },
+        data: {
+          usedCount: nextUsedCount,
+          isActive: shouldDeactivate ? false : matchedRegistrationCode.isActive
+        }
+      }).catch(err => console.error('Failed to update registration code usage:', err));
+
+      // Catat log audit pendaftaran
+      await prisma.adminAuditLog.create({
+        data: {
+          action: 'USER_REGISTERED',
+          details: JSON.stringify({
+            code: matchedRegistrationCode.code,
+            assignedRole,
+            remainingUses: matchedRegistrationCode.maxUses > 0 ? matchedRegistrationCode.maxUses - nextUsedCount : 'unlimited'
+          }),
+          targetId: user.id,
+          targetName: `${user.name} (${user.email})`,
+          actorId: user.id,
+          actorName: user.name,
+          actorEmail: user.email,
+          ipAddress: req.ip || req.headers['x-forwarded-for'] || 'direct'
+        }
+      }).catch(err => console.error('Failed to create audit log for registration:', err));
+    }
 
     const token = generateToken(user);
 
