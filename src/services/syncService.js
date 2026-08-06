@@ -509,7 +509,19 @@ class SyncService {
         return { success: false, storeId, source: 'Iklan Shopee', status: 'Gagal', message: metrics.message, origin };
       }
       const result = await this.persistAdsSnapshot(metrics);
-      const message = `[${storeId}] ${result.campaignCount} kampanye iklan disinkronkan. Nilai nominal dinormalisasi dengan pembagi ${metrics.amountDivisor}.`;
+
+      // Self-healing riwayat iklan: isi celah beberapa hari terakhir agar grafik tren tetap
+      // menyambung meski server sempat mati sehari. Murah — backfill melewati tanggal yang
+      // SUDAH tersimpan TANPA memanggil Shopee, jadi saat data mutakhir ini nol permintaan.
+      let backfilled = 0;
+      try {
+        const gap = await this.backfillAdsHistorySingleStore(storeId, { days: 7, overwrite: false });
+        backfilled = gap.filled || 0;
+      } catch (gapErr) {
+        console.warn(`[Sync] Backfill iklan ${storeId} dilewati:`, gapErr.message);
+      }
+
+      const message = `[${storeId}] ${result.campaignCount} kampanye iklan disinkronkan${backfilled ? `, ${backfilled} hari riwayat dilengkapi` : ''}. Nilai nominal dinormalisasi dengan pembagi ${metrics.amountDivisor}.`;
       await this.writeLog('ADS_SYNC', 'SUCCESS', message, timestamp);
       return { success: true, storeId, source: 'Iklan Shopee', status: 'Segar', message, campaignCount: result.campaignCount, origin };
     } catch (err) {
