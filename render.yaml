@@ -23,3 +23,7 @@ services:
       # bagikan hanya ke orang yang boleh punya akun.
       - key: REGISTRATION_SECRET
         sync: false
+      # Token bot Telegram (dari BotFather) untuk fitur notifikasi. Discord tak perlu ini —
+      # memakai webhook per pengguna. Kosongkan bila belum memakai Telegram.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false

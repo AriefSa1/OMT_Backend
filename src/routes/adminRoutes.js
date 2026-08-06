@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
 const adminAnalyticsController = require('../controllers/adminAnalyticsController');
+const notificationController = require('../controllers/notificationController');
 const { authMiddleware, requireAdmin } = require('../middleware/authMiddleware');
 
 // Semua rute admin diproteksi token otentikasi & validasi peran ADMIN
@@ -26,6 +27,14 @@ router.get('/stores/stats', adminAnalyticsController.getStoresStats);
 router.get('/analytics/compare', adminAnalyticsController.compareStores);
 router.get('/analytics/weekly', adminAnalyticsController.getWeeklyPerformance);
 router.get('/analytics/weekly/declining.csv', adminAnalyticsController.downloadDecliningCsv);
+
+// Notifikasi (Discord/Telegram; WhatsApp menyusul)
+router.get('/notifications/channels', notificationController.getChannels);
+router.get('/notifications/logs', notificationController.getLogs);
+router.get('/notifications/config/:userId', notificationController.getUserConfig);
+router.put('/notifications/config/:userId', notificationController.updateUserConfig);
+router.post('/notifications/send', notificationController.sendNotification);
+router.post('/notifications/test', notificationController.sendTest);
 
 // System Activity & Health Stats
 router.get('/stores', adminController.getAdminStores);

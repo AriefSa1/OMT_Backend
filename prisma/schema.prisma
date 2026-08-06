@@ -17,6 +17,43 @@ model User {
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
   stores    StoreSession[]
+  notificationConfig NotificationConfig?
+}
+
+/// Konfigurasi kanal notifikasi per pengguna. Admin mengisi ini agar bisa mengirim
+/// rencana kerja / hasil analisa ke pengguna. Nilai per-user: Discord memakai webhook URL
+/// milik channel pengguna; Telegram memakai chat ID (token bot bersifat global di env
+/// TELEGRAM_BOT_TOKEN). whatsappNumber disiapkan untuk kanal WhatsApp yang menyusul.
+model NotificationConfig {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  discordWebhookUrl String?
+  telegramChatId    String?
+  whatsappNumber    String?
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Jejak setiap upaya kirim notifikasi, supaya admin bisa melihat apa yang terkirim ke
+/// siapa dan lewat kanal apa (berhasil atau gagal). Pesan disimpan agar bisa dibaca ulang.
+model NotificationLog {
+  id            String   @id @default(uuid())
+  userId        String?
+  recipientName String?
+  channel       String   // discord | telegram | whatsapp
+  subject       String?
+  message       String
+  status        String   // SENT | FAILED
+  error         String?
+  actorId       String?
+  actorName     String?
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([channel, createdAt])
 }
 
 model StoreSession {
