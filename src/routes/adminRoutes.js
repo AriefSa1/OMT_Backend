@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
+const adminAnalyticsController = require('../controllers/adminAnalyticsController');
 const { authMiddleware, requireAdmin } = require('../middleware/authMiddleware');
 
 // Semua rute admin diproteksi token otentikasi & validasi peran ADMIN
@@ -19,6 +20,9 @@ router.get('/registration-codes', adminController.getRegistrationCodes);
 router.post('/registration-codes', adminController.createRegistrationCode);
 router.patch('/registration-codes/:id/toggle', adminController.toggleRegistrationCode);
 router.delete('/registration-codes/:id', adminController.deleteRegistrationCode);
+
+// Store Analytics (pembanding lintas toko/user)
+router.get('/stores/stats', adminAnalyticsController.getStoresStats);
 
 // System Activity & Health Stats
 router.get('/stores', adminController.getAdminStores);
