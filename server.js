@@ -26,6 +26,7 @@ const syncRoutes = require('./src/routes/syncRoutes');
 const growthIntelligenceRoutes = require('./src/routes/growthIntelligenceRoutes');
 const taskRoutes = require('./src/routes/taskRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
+const accountRoutes = require('./src/routes/accountRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -83,6 +84,7 @@ const authLimiter = createRateLimiter({
 
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/account', accountRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/shopee', shopeeRoutes);
 app.use('/api/warehouse', warehouseRoutes);
