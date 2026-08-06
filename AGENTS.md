@@ -1,5 +1,25 @@
 # Repository Guidelines
 
+## ⚠️ Alur Branch & Deploy (WAJIB DIIKUTI)
+
+Sejak 2026-08-07, repo ini memakai dua branch tetap:
+
+- **`dev`** — branch pengembangan. **Semua** pekerjaan (fitur, perbaikan, eksperimen)
+  di-commit dan di-push ke `dev`. Ini branch kerja default.
+- **`prod`** — branch produksi & jalur deploy. **JANGAN** push/merge ke `prod` kecuali
+  pemilik (user) secara eksplisit meminta redeploy. Meng-update `prod` = men-deploy ke
+  produksi.
+
+Aturan untuk agen mana pun:
+1. Selalu bekerja di `dev` (`git checkout dev`). Push hasil ke `origin/dev`.
+2. Jangan sentuh `prod` atas inisiatif sendiri. Hanya bila user berkata ingin
+   redeploy: `git checkout prod && git merge dev && git push origin prod`.
+3. `main` adalah branch lama sebelum pemisahan ini — jangan dipakai lagi untuk kerja baru.
+
+Catatan deploy: platform (Render) harus disetel agar production branch-nya = `prod`
+(Dashboard Render → Settings → Branch). Sampai itu diubah, deploy masih mengikuti branch
+lama. Ini pengaturan yang hanya bisa diubah pemilik di dashboard.
+
 **Dokumentasi lengkap** (arsitektur, referensi field respons tiap endpoint, katalog nilai/
 ambang yang bisa diubah): `npm run docs` untuk daftar, atau langsung baca `docs/`. Mulai dari
 `docs/API_REFERENCE.md` kalau tujuannya mengubah data yang dikembalikan sebuah endpoint.
