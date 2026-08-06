@@ -24,6 +24,8 @@ router.delete('/registration-codes/:id', adminController.deleteRegistrationCode)
 // Store Analytics (pembanding lintas toko/user)
 router.get('/stores/stats', adminAnalyticsController.getStoresStats);
 router.get('/analytics/compare', adminAnalyticsController.compareStores);
+router.get('/analytics/weekly', adminAnalyticsController.getWeeklyPerformance);
+router.get('/analytics/weekly/declining.csv', adminAnalyticsController.downloadDecliningCsv);
 
 // System Activity & Health Stats
 router.get('/stores', adminController.getAdminStores);

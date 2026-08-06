@@ -1,6 +1,7 @@
 const prisma = require('../utils/prisma');
 const { wrapHandlers } = require('../utils/asyncHandler');
 const storeStatsService = require('../services/storeStatsService');
+const { toCsv } = require('../utils/csv');
 
 const MAX_PERIOD_DAYS = 180;
 
@@ -162,4 +163,76 @@ async function compareStores(req, res) {
   return res.json({ success: true, data: { periodDays: days, currentStart, stores } });
 }
 
-module.exports = wrapHandlers({ getStoresStats, compareStores });
+async function resolveStoreName(storeId) {
+  const sess = await prisma.storeSession.findUnique({ where: { storeId }, select: { storeName: true } });
+  return sess?.storeName || storeId;
+}
+
+/**
+ * GET /api/admin/analytics/weekly?storeId=X&weeks=4&metric=units
+ * Performa mingguan per produk untuk satu toko (untuk tabel + sorotan produk menurun).
+ */
+async function getWeeklyPerformance(req, res) {
+  const storeId = String(req.query.storeId || '').trim();
+  if (!storeId) {
+    return res.status(400).json({ success: false, error: 'Parameter storeId wajib diisi.' });
+  }
+  const metric = req.query.metric === 'sales' ? 'sales' : 'units';
+  const weeks = Number(req.query.weeks) || 4;
+
+  const [storeName, result] = await Promise.all([
+    resolveStoreName(storeId),
+    storeStatsService.getWeeklyProductPerformance({ storeId, weeks, metric })
+  ]);
+
+  return res.json({ success: true, data: { storeName, ...result } });
+}
+
+/**
+ * GET /api/admin/analytics/weekly/declining.csv?storeId=X&weeks=4&metric=units
+ * Unduh CSV berisi HANYA produk yang cenderung menurun tiap minggu di satu toko —
+ * inilah daftar pantauan yang diminta: produk yang perlu ditindaklanjuti.
+ */
+async function downloadDecliningCsv(req, res) {
+  const storeId = String(req.query.storeId || '').trim();
+  if (!storeId) {
+    return res.status(400).json({ success: false, error: 'Parameter storeId wajib diisi.' });
+  }
+  const metric = req.query.metric === 'sales' ? 'sales' : 'units';
+  const weeks = Number(req.query.weeks) || 4;
+
+  const storeName = await resolveStoreName(storeId);
+  const result = await storeStatsService.getWeeklyProductPerformance({ storeId, weeks, metric });
+  const declining = result.products.filter((p) => p.declining);
+
+  const metricLabel = metric === 'sales' ? 'Omzet' : 'Unit Terjual';
+  const weekHeaders = result.weeks.map((w) => `${w.label} (${w.start} s/d ${w.end})`);
+  const headers = [
+    'Toko', 'Produk', 'Item ID', 'Kategori',
+    ...weekHeaders,
+    `Metrik`, 'Streak Turun (minggu)', 'Perubahan Minggu Terakhir (%)', 'Perubahan Total (%)'
+  ];
+
+  const round = (v) => (v === null || v === undefined ? '' : Math.round(v * 10) / 10);
+  const rows = declining.map((p) => [
+    storeName,
+    p.name,
+    p.shopeeItemId,
+    p.category,
+    ...p.weekly,
+    metricLabel,
+    p.declineStreak,
+    round(p.wowChangePct),
+    round(p.netChangePct)
+  ]);
+
+  const csv = toCsv(headers, rows);
+  const safeStore = storeName.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 40);
+  const filename = `produk-menurun_${safeStore}_${metric}_${result.weeks.length}minggu.csv`;
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  return res.send(csv);
+}
+
+module.exports = wrapHandlers({ getStoresStats, compareStores, getWeeklyPerformance, downloadDecliningCsv });

@@ -115,4 +115,111 @@ async function getStoreMetrics(storeIds, days = 30) {
   return result;
 }
 
-module.exports = { getStoreMetrics, buildWindows };
+/**
+ * Performa mingguan per produk untuk satu toko, dipakai memantau produk yang
+ * "cenderung menurun setiap minggu". Minggu = blok 7 hari yang ditambatkan pada hari ini
+ * (minggu 0 = 7 hari terakhir, minggu 1 = 7 hari sebelumnya, dst.), bukan minggu kalender —
+ * supaya "minggu terakhir" selalu berarti tujuh hari terakhir apa pun harinya sekarang.
+ *
+ * Sebuah produk ditandai MENURUN bila metrik mingguannya turun berturut-turut minimal
+ * `minStreak` minggu terakhir (default 2) DAN sempat punya aktivitas (baseline > 0) —
+ * jadi hanya produk yang benar-benar kehilangan traksi, bukan yang memang selalu nol.
+ *
+ * @param {object} opts
+ * @param {string} opts.storeId
+ * @param {number} [opts.weeks=4] jumlah blok minggu yang dihitung
+ * @param {'units'|'sales'} [opts.metric='units']
+ * @param {number} [opts.minStreak=2] panjang streak turun minimum agar dianggap menurun
+ */
+async function getWeeklyProductPerformance({ storeId, weeks = 4, metric = 'units', minStreak = 2 }) {
+  const weekCount = Math.min(Math.max(Math.floor(weeks) || 4, 2), 12);
+  const metricField = metric === 'sales' ? 'confirmedSales' : 'confirmedUnits';
+
+  // Bangun batas tiap blok minggu, urut dari terlama ke terbaru.
+  const buckets = [];
+  for (let k = weekCount - 1; k >= 0; k -= 1) {
+    buckets.push({
+      index: weekCount - 1 - k,
+      start: shiftDateKey(-(7 * k + 6)),
+      end: shiftDateKey(-(7 * k)),
+      label: `Minggu ${weekCount - k}`
+    });
+  }
+  const earliest = buckets[0].start;
+
+  const rows = await prisma.productMetricSnapshot.findMany({
+    where: { storeId, date: { gte: earliest } },
+    select: { shopeeItemId: true, productName: true, category: true, date: true, confirmedUnits: true, confirmedSales: true }
+  });
+
+  // Agregasi per produk per blok minggu.
+  const products = new Map();
+  const bucketOf = (date) => buckets.find((b) => date >= b.start && date <= b.end);
+  for (const row of rows) {
+    const bucket = bucketOf(row.date);
+    if (!bucket) continue;
+    let entry = products.get(row.shopeeItemId);
+    if (!entry) {
+      entry = {
+        shopeeItemId: row.shopeeItemId,
+        name: row.productName,
+        category: row.category,
+        weekly: new Array(weekCount).fill(0)
+      };
+      products.set(row.shopeeItemId, entry);
+    }
+    entry.weekly[bucket.index] += metric === 'sales' ? (row.confirmedSales || 0) : (row.confirmedUnits || 0);
+    if (row.productName) entry.name = row.productName;
+  }
+
+  const analyzed = [...products.values()].map((p) => {
+    const w = p.weekly;
+    const latest = w[w.length - 1];
+    const first = w[0];
+
+    // Streak turun dihitung dari minggu terbaru mundur: berapa langkah berturut-turut
+    // metrik lebih kecil dari minggu sebelumnya.
+    let declineStreak = 0;
+    for (let i = w.length - 1; i > 0; i -= 1) {
+      if (w[i] < w[i - 1]) declineStreak += 1;
+      else break;
+    }
+    const prev = w[w.length - 2] ?? 0;
+    const wowChangePct = prev ? ((latest - prev) / prev) * 100 : (latest ? null : 0);
+    const netChangePct = first ? ((latest - first) / first) * 100 : (latest ? null : 0);
+    const baseline = Math.max(...w);
+    const declining = declineStreak >= minStreak && baseline > 0;
+
+    return {
+      shopeeItemId: p.shopeeItemId,
+      name: p.name,
+      category: p.category,
+      weekly: w,
+      latest,
+      declineStreak,
+      wowChangePct,
+      netChangePct,
+      declining
+    };
+  });
+
+  // Yang menurun didahulukan; di antara yang menurun, streak terpanjang & penurunan
+  // terbesar di atas.
+  analyzed.sort((a, b) => {
+    if (a.declining !== b.declining) return a.declining ? -1 : 1;
+    if (b.declineStreak !== a.declineStreak) return b.declineStreak - a.declineStreak;
+    return (a.netChangePct ?? 0) - (b.netChangePct ?? 0);
+  });
+
+  return {
+    storeId,
+    metric,
+    metricField,
+    minStreak,
+    weeks: buckets.map((b) => ({ label: b.label, start: b.start, end: b.end })),
+    products: analyzed,
+    decliningCount: analyzed.filter((p) => p.declining).length
+  };
+}
+
+module.exports = { getStoreMetrics, buildWindows, getWeeklyProductPerformance };
