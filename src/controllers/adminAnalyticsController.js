@@ -168,8 +168,20 @@ async function resolveStoreName(storeId) {
   return sess?.storeName || storeId;
 }
 
+// Metrik penentu status menurun: pengunjung/UV (default), unit, atau omzet.
+function parseWeeklyMetric(value) {
+  return ['visitors', 'units', 'sales'].includes(value) ? value : 'visitors';
+}
+
+const DIAGNOSIS_LABEL = {
+  TRAFIK: 'Trafik turun',
+  KONVERSI: 'Konversi turun',
+  TRAFIK_DAN_KONVERSI: 'Trafik & konversi turun',
+  RINGAN: 'Penurunan ringan'
+};
+
 /**
- * GET /api/admin/analytics/weekly?storeId=X&weeks=4&metric=units
+ * GET /api/admin/analytics/weekly?storeId=X&weeks=4&metric=visitors
  * Performa mingguan per produk untuk satu toko (untuk tabel + sorotan produk menurun).
  */
 async function getWeeklyPerformance(req, res) {
@@ -177,7 +189,7 @@ async function getWeeklyPerformance(req, res) {
   if (!storeId) {
     return res.status(400).json({ success: false, error: 'Parameter storeId wajib diisi.' });
   }
-  const metric = req.query.metric === 'sales' ? 'sales' : 'units';
+  const metric = parseWeeklyMetric(req.query.metric);
   const weeks = Number(req.query.weeks) || 4;
 
   const [storeName, result] = await Promise.all([
@@ -198,19 +210,21 @@ async function downloadDecliningCsv(req, res) {
   if (!storeId) {
     return res.status(400).json({ success: false, error: 'Parameter storeId wajib diisi.' });
   }
-  const metric = req.query.metric === 'sales' ? 'sales' : 'units';
+  const metric = parseWeeklyMetric(req.query.metric);
   const weeks = Number(req.query.weeks) || 4;
 
   const storeName = await resolveStoreName(storeId);
   const result = await storeStatsService.getWeeklyProductPerformance({ storeId, weeks, metric });
   const declining = result.products.filter((p) => p.declining);
 
-  const metricLabel = metric === 'sales' ? 'Omzet' : 'Unit Terjual';
   const weekHeaders = result.weeks.map((w) => `${w.label} (${w.start} s/d ${w.end})`);
+  // CSV dibuat actionable: diagnosis penyebab + tren ketiga metrik (UV/unit/omzet)
+  // berdampingan, jadi admin bisa memutuskan tindakan tanpa membuka aplikasi.
   const headers = [
-    'Toko', 'Produk', 'Item ID', 'Kategori',
-    ...weekHeaders,
-    `Metrik`, 'Streak Turun (minggu)', 'Perubahan Minggu Terakhir (%)', 'Perubahan Total (%)'
+    'Toko', 'Produk', 'Item ID', 'Kategori', 'Diagnosis',
+    `Metrik Penentu`, ...weekHeaders,
+    'Streak Turun (minggu)', 'Perubahan Minggu Terakhir (%)', 'Perubahan Total (%)',
+    'Tren UV (%)', 'Tren Unit (%)', 'Tren Omzet (%)'
   ];
 
   const round = (v) => (v === null || v === undefined ? '' : Math.round(v * 10) / 10);
@@ -219,11 +233,15 @@ async function downloadDecliningCsv(req, res) {
     p.name,
     p.shopeeItemId,
     p.category,
+    DIAGNOSIS_LABEL[p.diagnosis] || '',
+    result.metricLabel,
     ...p.weekly,
-    metricLabel,
     p.declineStreak,
     round(p.wowChangePct),
-    round(p.netChangePct)
+    round(p.netChangePct),
+    round(p.metrics?.visitors?.netPct),
+    round(p.metrics?.units?.netPct),
+    round(p.metrics?.sales?.netPct)
   ]);
 
   const csv = toCsv(headers, rows);
