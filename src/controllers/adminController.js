@@ -622,44 +622,71 @@ async function getAuditLogs(req, res) {
  */
 async function getAdminStores(req, res) {
   try {
-    const stores = await prisma.storeSession.findMany({
+    // Catatan: jumlah produk/order TIDAK diambil lewat relasi Prisma (`_count`). Model
+    // StoreSession tidak punya relasi balik ke ShopeeProduct/ShopeeOrderSummary — keduanya
+    // hanya berbagi kolom `storeId` biasa, tanpa foreign key. Menambah relasi berarti
+    // `prisma db push` mencoba membuat FK terhadap data lama yang mungkin punya storeId
+    // yatim, dan itu bisa gagal di basis data produksi. groupBy per storeId aman dan sama
+    // cepatnya. (Versi sebelumnya memilih `isCustomName` + relasi yang tak ada sehingga
+    // endpoint ini selalu 500.)
+    const sessions = await prisma.storeSession.findMany({
       select: {
         id: true,
         storeName: true,
         storeId: true,
         isActive: true,
-        isCustomName: true,
         lastSyncedAt: true,
         createdAt: true,
         updatedAt: true,
         userId: true,
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            role: true
-          }
-        },
-        _count: {
-          select: {
-            products: true,
-            orderSummaries: true
-          }
-        }
+        user: { select: { id: true, name: true, email: true, role: true } }
       },
       orderBy: { createdAt: 'desc' }
     });
 
-    const totalStores = stores.length;
-    const activeStores = stores.filter((s) => s.isActive).length;
+    const storeIds = sessions.map((s) => s.storeId);
+    const [productCounts, orderCounts] = await Promise.all([
+      prisma.shopeeProduct.groupBy({
+        by: ['storeId'],
+        where: { storeId: { in: storeIds } },
+        _count: { shopeeItemId: true }
+      }),
+      prisma.shopeeOrderSummary.groupBy({
+        by: ['storeId'],
+        where: { storeId: { in: storeIds } },
+        _count: { id: true }
+      })
+    ]);
+    const productByStore = new Map(productCounts.map((r) => [r.storeId, r._count.shopeeItemId]));
+    const orderByStore = new Map(orderCounts.map((r) => [r.storeId, r._count.id]));
+
+    // Bentuk respons disamakan dengan yang dibaca panel admin (owner/lastSyncAt/totalProducts).
+    // `_count` tetap disertakan untuk kompatibilitas dengan kode yang membaca s._count.products.
+    const stores = sessions.map((s) => {
+      const totalProducts = productByStore.get(s.storeId) || 0;
+      const totalOrders = orderByStore.get(s.storeId) || 0;
+      return {
+        id: s.id,
+        storeId: s.storeId,
+        storeName: s.storeName,
+        isActive: s.isActive,
+        lastSyncAt: s.lastSyncedAt,
+        lastSyncedAt: s.lastSyncedAt,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        owner: s.user ? { id: s.user.id, name: s.user.name, email: s.user.email, role: s.user.role } : null,
+        totalProducts,
+        totalOrders,
+        _count: { products: totalProducts, orderSummaries: totalOrders }
+      };
+    });
 
     return res.json({
       success: true,
       data: {
         stores,
-        totalStores,
-        activeStores
+        totalStores: stores.length,
+        activeStores: stores.filter((s) => s.isActive).length
       }
     });
   } catch (err) {
