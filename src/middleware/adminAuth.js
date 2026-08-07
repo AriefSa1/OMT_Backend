@@ -7,6 +7,17 @@
  *
  * ADMIN_API_KEY didefinisikan di environment (.env), TIDAK diekspor ke frontend.
  */
+const crypto = require('crypto');
+
+// Perbandingan token waktu-konstan. timingSafeEqual butuh panjang buffer sama,
+// jadi kedua sisi di-hash dulu (SHA-256, selalu 32 byte) — sekaligus mencegah
+// kebocoran panjang key lewat waktu perbandingan.
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
 const authenticateAdmin = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -17,7 +28,7 @@ const authenticateAdmin = (req, res, next) => {
   const token = authHeader.split(' ')[1];
   const expectedKey = process.env.ADMIN_API_KEY;
 
-  if (!expectedKey || token !== expectedKey) {
+  if (!expectedKey || !token || !safeEqual(token, expectedKey)) {
     return res.status(403).json({ error: 'Unauthorized — akses admin saja' });
   }
 

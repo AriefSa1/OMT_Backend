@@ -17,7 +17,8 @@ const {
   validateCookie,
 } = require('../controllers/shopeeController');
 
-const prisma = require('../utils/prisma');
+const credentialService = require('../services/credentialService');
+const { createRateLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
@@ -41,27 +42,28 @@ router.get('/validate-cookie', validateCookie);
 // --- Admin-only routes (store-scoped credential management) ---
 const adminRouter = express.Router();
 
-// GET /api/shopee/credentials — list stored credentials (admin only)
-adminRouter.get('/credentials', authenticateAdmin, async (req, res) => {
+// Rate limit khusus jalur admin: bearer-key statis tanpa pembatasan bisa ditebak
+// atau disalahgunakan. 30 request / 5 menit / IP cukup longgar untuk pemakaian sah.
+const adminLimiter = createRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: Number(process.env.ADMIN_RATE_LIMIT_MAX) || 30,
+  message: 'Terlalu banyak permintaan admin. Coba lagi dalam beberapa menit.',
+});
+adminRouter.use(adminLimiter, authenticateAdmin);
+
+// GET /api/shopee/credentials — list stored credentials (metadata only; cookie
+// terenkripsi TIDAK PERNAH dikembalikan)
+adminRouter.get('/credentials', async (req, res) => {
   try {
-    const credentials = await prisma.shopeeCredential.findMany({
-      select: {
-        id: true,
-        storeId: true,
-        createdAt: true,
-        updatedAt: true,
-        // NOTE: cookie is intentionally NOT returned for security
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const credentials = await credentialService.listCredentials();
     res.json({ credentials });
   } catch (err) {
     res.status(500).json({ error: 'Gagal mengambil daftar credential' });
   }
 });
 
-// POST /api/shopee/credentials — save a new Shopee cookie (admin only)
-adminRouter.post('/credentials', authenticateAdmin, async (req, res) => {
+// POST /api/shopee/credentials — save a new Shopee cookie (disimpan terenkripsi)
+adminRouter.post('/credentials', async (req, res) => {
   const { cookie, storeId } = req.body;
 
   if (!cookie || typeof cookie !== 'string' || cookie.length < 100) {
@@ -69,13 +71,10 @@ adminRouter.post('/credentials', authenticateAdmin, async (req, res) => {
   }
 
   try {
-    const cred = await prisma.shopeeCredential.upsert({
-      where: { storeId: storeId || 'global' },
-      update: { cookie, storeId: storeId || 'global' },
-      create: { cookie, storeId: storeId || 'global' },
-    });
+    const cred = await credentialService.saveCredential(cookie, storeId);
 
-    console.log(`[SECURITY] Shopee cookie saved via admin panel`, {
+    // Jangan pernah mencatat isi cookie — hanya metadata untuk jejak audit.
+    console.log('[SECURITY] Shopee cookie saved via admin panel', {
       storeId: cred.storeId,
       timestamp: new Date().toISOString(),
     });
@@ -88,10 +87,13 @@ adminRouter.post('/credentials', authenticateAdmin, async (req, res) => {
 });
 
 // DELETE /api/shopee/credentials/:id — remove a stored credential (admin only)
-adminRouter.delete('/credentials/:id', authenticateAdmin, async (req, res) => {
+adminRouter.delete('/credentials/:id', async (req, res) => {
   const { id } = req.params;
+  if (!Number.isInteger(Number(id))) {
+    return res.status(400).json({ error: 'ID credential tidak valid' });
+  }
   try {
-    await prisma.shopeeCredential.delete({ where: { id: Number(id) } });
+    await credentialService.deleteCredential(id);
     res.json({ success: true });
   } catch (err) {
     res.status(404).json({ error: 'Credential tidak ditemukan' });

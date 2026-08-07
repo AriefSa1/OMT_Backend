@@ -1,10 +1,16 @@
-const axios = require('axios');
 const prisma = require('../utils/prisma');
 const configService = require('./configService');
+const credentialService = require('./credentialService');
+const { shopeeRequest } = require('../utils/shopeeHttp');
 const { extractCsrfFromCookie, extractCatalogCsrfFromCookie, getShopeeHeaders } = require('../utils/headerGenerator');
 
-let activeCookie = '';
-let cachedNormalizedProducts = [];
+// Cookie default tunggal yang SENGAJA dikonfigurasi (dari config.cookieString saat
+// startup, atau store terakhir yang disimpan lewat saveSession). INVARIAN: hanya
+// diubah oleh setCookie() — TIDAK PERNAH ditulis dari hasil lookup per-request.
+// Itu yang dulu bikin race: getActiveSession() menimpanya berdasar storeId yang
+// sedang dilihat, sehingga request store lain yang konkuren bisa menyedot cookie
+// store tetangga. Sekarang resolusi cookie selalu memakai session per-request.
+let configuredCookie = '';
 const SHOPEE_HOMEPAGE_ADS_ENDPOINT = 'https://seller.shopee.co.id/api/pas/v1/homepage/query/';
 const SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v4/product/performance/';
 // endpoint_shopee.json -> datacenter_key_metrics. Seller Center's own dashboard endpoint;
@@ -219,8 +225,30 @@ function emptyShopeeState(message = 'Connect your Shopee store in Settings to vi
 
 class ShopeeService {
   setCookie(cookie) {
-    activeCookie = cookie || '';
-    console.log(`[Shopee Service] Active store cookie ${activeCookie ? 'updated' : 'cleared'}.`);
+    configuredCookie = cookie || '';
+    console.log(`[Shopee Service] Configured default cookie ${configuredCookie ? 'updated' : 'cleared'}.`);
+  }
+
+  /**
+   * Sumber cookie tunggal untuk semua request keluar. Resolusi per-request penuh —
+   * tanpa state global yang bisa bocor antar-store saat sync konkuren. Prioritas:
+   *   1. cookie eksplisit dari pemanggil (customCookie)
+   *   2. cookie sesi per-request yang sudah di-resolve (session.cookieString) —
+   *      untuk storeId tertentu ini cookie store itu; tanpa storeId ini cookie
+   *      sesi aktif. Selalu benar untuk store yang diminta.
+   *   3. kredensial terpusat yang dikelola admin (ShopeeCredential) — store lalu global
+   *   4. default tunggal yang dikonfigurasi (configuredCookie) — HANYA untuk jalur
+   *      tanpa storeId. Permintaan store spesifik tidak boleh jatuh ke default global
+   *      milik store lain (isolasi), jadi dikembalikan '' bila tak ada sumber sah.
+   */
+  async _resolveCookie({ customCookie = '', storeId = null, session = null } = {}) {
+    if (customCookie) return customCookie;
+    if (session?.cookieString) return session.cookieString;
+
+    const managed = await credentialService.resolveCookie(storeId);
+    if (managed) return managed;
+
+    return storeId ? '' : (configuredCookie || '');
   }
 
   async getActiveSession(storeId = null, user = null) {
@@ -237,9 +265,6 @@ class ShopeeService {
         // Enforce user ownership if user is non-admin
         if (user && user.role !== 'ADMIN' && specific.userId && specific.userId !== user.id) {
           return null;
-        }
-        if (specific.cookieString && !activeCookie) {
-          activeCookie = specific.cookieString;
         }
         return specific;
       }
@@ -271,10 +296,6 @@ class ShopeeService {
           },
         },
       });
-    }
-
-    if (session?.cookieString && !activeCookie) {
-      activeCookie = session.cookieString;
     }
 
     return session;
@@ -518,7 +539,7 @@ class ShopeeService {
    */
   async fetchProductCategory(itemId, { cookie: customCookie = '', session: knownSession = null } = {}) {
     const session = knownSession || await this.getActiveSession();
-    const cookie = customCookie || activeCookie || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ customCookie, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken || !itemId) return null;
 
@@ -530,7 +551,7 @@ class ShopeeService {
     });
 
     try {
-      const response = await axios.get(`${SHOPEE_PRODUCT_INFO_ENDPOINT}?${params}`, {
+      const response = await shopeeRequest({ method: 'get', url: `${SHOPEE_PRODUCT_INFO_ENDPOINT}?${params}`,
         headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
         timeout: 15000,
       });
@@ -633,7 +654,7 @@ class ShopeeService {
     const config = await configService.getAll();
     if (!config.shopeeOrderSummaryUrl) return null;
 
-    const response = await axios.get(config.shopeeOrderSummaryUrl, {
+    const response = await shopeeRequest({ method: 'get', url: config.shopeeOrderSummaryUrl,
       headers: getShopeeHeaders(cookie, session?.csrfToken, session?.userAgent),
       timeout: 10000,
     });
@@ -663,7 +684,7 @@ class ShopeeService {
    */
   async fetchOrderSummaryRealtime({ cookie: customCookie = '', storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
-    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', row: null, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
@@ -680,7 +701,7 @@ class ShopeeService {
     });
 
     try {
-      const response = await axios.get(`${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`, {
+      const response = await shopeeRequest({ method: 'get', url: `${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`,
         headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
         timeout: 12000,
       });
@@ -725,7 +746,7 @@ class ShopeeService {
 
   async fetchOrderSummaryHistory({ days = 30, includeToday = true, cookie: customCookie = '', storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
-    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', rows: [], message: 'Simpan cookie Shopee yang valid di Pengaturan sebelum mengambil ringkasan pesanan.' };
@@ -743,7 +764,7 @@ class ShopeeService {
     });
 
     try {
-      const response = await axios.get(`${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`, {
+      const response = await shopeeRequest({ method: 'get', url: `${SHOPEE_KEY_METRICS_ENDPOINT}?${params}`,
         headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
         timeout: 15000,
       });
@@ -823,7 +844,7 @@ class ShopeeService {
    */
   async fetchOrderPerformanceHistory({ days = 30, cookie: customCookie = '', storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
-    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) return { source: 'EMPTY', rows: [], message: 'Sesi Shopee tidak tersedia.' };
 
@@ -839,7 +860,7 @@ class ShopeeService {
     });
 
     try {
-      const response = await axios.get(`${SHOPEE_ORDER_PERFORMANCE_ENDPOINT}?${params}`, {
+      const response = await shopeeRequest({ method: 'get', url: `${SHOPEE_ORDER_PERFORMANCE_ENDPOINT}?${params}`,
         headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
         timeout: 15000,
       });
@@ -890,7 +911,7 @@ class ShopeeService {
    */
   async fetchTrafficSources({ days = 6, storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
-    const cookie = (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) {
       return { source: 'EMPTY', channels: [], message: 'Simpan cookie Shopee yang valid di Pengaturan untuk melihat sumber kunjungan.' };
@@ -908,7 +929,7 @@ class ShopeeService {
     });
 
     try {
-      const response = await axios.get(`https://seller.shopee.co.id/api/mydata/v1/dashboard/traffic-sources/?${params}`, {
+      const response = await shopeeRequest({ method: 'get', url: `https://seller.shopee.co.id/api/mydata/v1/dashboard/traffic-sources/?${params}`,
         headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
         timeout: 15000,
       });
@@ -1007,7 +1028,7 @@ class ShopeeService {
 
   async fetchLiveShopeeMetrics(customCookie = '', storeId = null) {
     const session = await this.getActiveSession(storeId);
-    const cookie = customCookie || (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
 
     if (!cookie) {
       return emptyShopeeState();
@@ -1048,7 +1069,7 @@ class ShopeeService {
       do {
         const pageUrl = new URL(searchProductUrl);
         if (nextCursor) pageUrl.searchParams.set('cursor', nextCursor);
-        const res = await axios.get(pageUrl.toString(), { headers, timeout: 10000 });
+        const res = await shopeeRequest({ method: 'get', url: pageUrl.toString(), headers, timeout: 10000 });
 
         if (!res.data || res.data.code !== 0 || !Array.isArray(res.data.data?.products)) {
           return emptyShopeeState('Shopee returned no product data. Check the cookie in Settings.');
@@ -1137,7 +1158,6 @@ class ShopeeService {
         pendingFulfillments: 0,
       };
 
-      cachedNormalizedProducts = normalizedProducts;
       await this.persistProducts(storeId, normalizedProducts);
       if (orderSummary) await this.persistOrderSummary(storeId, summary);
       await prisma.storeSession.updateMany({
@@ -1188,9 +1208,6 @@ class ShopeeService {
   }
 
   async getProductById(itemId) {
-    const cached = cachedNormalizedProducts.find((product) => product.shopeeItemId === String(itemId));
-    if (cached) return cached;
-
     const product = await prisma.shopeeProduct.findUnique({ where: { shopeeItemId: String(itemId) } });
     return product || null;
   }
@@ -1211,19 +1228,22 @@ class ShopeeService {
       if (!csrfToken) throw new Error('Sesi Shopee aktif tidak memiliki token CSRF.');
       const { startTime, endTime, period: activePeriod } = getAdsTimeRange(period, customStart, customEnd);
       const query = new URLSearchParams({ SPC_CDS: csrfToken, SPC_CDS_VER: '2' });
-      const response = await axios.post(`${SHOPEE_HOMEPAGE_ADS_ENDPOINT}?${query}`, {
-        start_time: startTime,
-        end_time: endTime,
-        filter_list: [{
-          campaign_type: 'product_homepage_v3',
-          state: 'all',
-          search_term: '',
-          is_valid_rebate_only: false,
-        }],
-        offset: 0,
-        limit: 200,
-        use_paid_gmv: false,
-      }, {
+      const response = await shopeeRequest({
+        method: 'post',
+        url: `${SHOPEE_HOMEPAGE_ADS_ENDPOINT}?${query}`,
+        data: {
+          start_time: startTime,
+          end_time: endTime,
+          filter_list: [{
+            campaign_type: 'product_homepage_v3',
+            state: 'all',
+            search_term: '',
+            is_valid_rebate_only: false,
+          }],
+          offset: 0,
+          limit: 200,
+          use_paid_gmv: false,
+        },
         headers: {
           ...getShopeeHeaders(session.cookieString, csrfToken, session.userAgent),
           Referer: 'https://seller.shopee.co.id/portal/marketing/ads/homepage',
@@ -1393,7 +1413,9 @@ class ShopeeService {
       });
 
       const url = `${SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT}?${queryParams.toString()}`;
-      const response = await axios.get(url, {
+      const response = await shopeeRequest({
+        method: 'get',
+        url,
         headers: {
           ...getShopeeHeaders(session.cookieString, csrfToken, session.userAgent),
           Referer: 'https://seller.shopee.co.id/portal/datacenter/product/performance',
