@@ -1426,32 +1426,31 @@ class WarehouseService {
 
     // One SKU can have one row per active warehouse. Prefer the requested row,
     // otherwise use the row with the highest current stock as metadata source.
-    let item = await prisma.warehouseItem.findFirst({
+    // Single findMany replaces: findFirst(exact) → findFirst(fallback) → findMany(all rows)
+    let persistedWarehouseRows = await prisma.warehouseItem.findMany({
       where: { sku, ...warehouseWhere },
       orderBy: [{ totalStock: 'desc' }, { lastUpdated: 'desc' }],
     });
 
-    if (!item) {
-      item = await prisma.warehouseItem.findFirst({
+    // Fallback to contains() match if exact SKU not found.
+    if (!persistedWarehouseRows.length && !hasWarehouseRequest) {
+      persistedWarehouseRows = await prisma.warehouseItem.findMany({
         where: {
-          ...warehouseWhere,
+          warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST },
           OR: [
             { sku: { contains: sku } },
             { refId: { contains: sku } },
             { name: { contains: sku } },
           ],
         },
+        orderBy: [{ totalStock: 'desc' }, { lastUpdated: 'desc' }],
       });
     }
 
+    // The "primary" item is the best-scoring row (highest stock, most recent update).
+    // This preserves the original logic of selecting one row as metadata source.
+    const item = persistedWarehouseRows[0] || null;
     const rawIds = item ? { rawProductId: item.rawProductId, rawVariationId: item.rawVariationId } : null;
-    const persistedWarehouseRows = await prisma.warehouseItem.findMany({
-      where: {
-        sku: item?.sku || sku,
-        warehouseId: { in: ACTIVE_WAREHOUSE_ID_LIST },
-      },
-      orderBy: [{ warehouseId: 'asc' }, { lastUpdated: 'desc' }],
-    });
     const persistedWarehouseOptions = ACTIVE_WAREHOUSES.map((warehouse) => {
       const row = persistedWarehouseRows.find((candidate) => Number(candidate.warehouseId) === warehouse.id);
       const totalStock = Number(row?.totalStock || 0);

@@ -153,6 +153,7 @@ model ShopeeOrderSummary {
   createdAt         DateTime @default(now())
 
   @@unique([storeId, date])
+  @@index([storeId, date])
 }
 
 model ShopeeAdsData {
@@ -178,6 +179,7 @@ model ShopeeAdsData {
   createdAt   DateTime @default(now())
 
   @@unique([storeId, date])
+  @@index([storeId, date])
 }
 
 model ShopeeAdsCampaignSnapshot {

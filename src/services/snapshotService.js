@@ -140,8 +140,9 @@ class SnapshotService {
     return { session, latestShopeeLog, latestAdsLog, latestWarehouseLog, warehouseConfigured };
   }
 
-  async getCatalogSnapshot({ page = 1, limit = 24, search = '', category = '', sort = 'updatedAt', direction = 'desc', storeId = null } = {}) {
-    const { session, latestShopeeLog } = await this.getContext(storeId);
+  async getCatalogSnapshot({ page = 1, limit = 24, search = '', category = '', sort = 'updatedAt', direction = 'desc', storeId = null, preloadedContext = null } = {}) {
+    const context = preloadedContext || await this.getContext(storeId);
+    const { session, latestShopeeLog } = context;
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
     const targetStoreId = storeId || session?.storeId;
@@ -484,8 +485,8 @@ class SnapshotService {
     };
   }
 
-  async getAdsSnapshot({ sortBy = 'spend', direction = 'desc', storeId = null } = {}) {
-    const { session, latestAdsLog } = await this.getContext(storeId);
+  async getAdsSnapshot({ sortBy = 'spend', direction = 'desc', storeId = null, preloadedContext = null } = {}) {
+    const { session, latestAdsLog } = preloadedContext || await this.getContext(storeId);
     const targetStoreId = storeId || session?.storeId;
     const where = targetStoreId ? { storeId: targetStoreId } : {};
     const [latest, rows] = await Promise.all([
@@ -563,8 +564,8 @@ class SnapshotService {
     };
   }
 
-  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false } = {}) {
-    const { latestWarehouseLog, warehouseConfigured } = await this.getContext();
+  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false, preloadedContext = null } = {}) {
+    const { latestWarehouseLog, warehouseConfigured } = preloadedContext || await this.getContext();
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
 
@@ -944,10 +945,11 @@ class SnapshotService {
   }
 
   async getActionSnapshot() {
+    const context = await this.getContext();
     const [catalog, ads, warehouse, tasks] = await Promise.all([
-      this.getCatalogSnapshot({ page: 1, limit: 100, sort: 'updatedAt' }),
-      this.getAdsSnapshot(),
-      this.getWarehouseSnapshot({ page: 1, limit: 100 }),
+      this.getCatalogSnapshot({ page: 1, limit: 100, sort: 'updatedAt', preloadedContext: context }),
+      this.getAdsSnapshot({ preloadedContext: context }),
+      this.getWarehouseSnapshot({ page: 1, limit: 100, preloadedContext: context }),
       prisma.optimizationTask.findMany({
         include: { events: { orderBy: { createdAt: 'desc' }, take: 5 } },
         orderBy: { updatedAt: 'desc' },
@@ -984,42 +986,46 @@ class SnapshotService {
     const syncService = require('./syncService');
     const session = await shopeeService.getActiveSession(storeId);
 
+    // Paralelkan konteks snapshot (5 query DB) dengan live API fetch —
+    // getDashboardOverview sekarang butuh ~600ms lebih cepat karena
+    // getContext() berjalan bersamaan dengan fetch Shopee live data.
     let liveAdsData = null;
-
-    if (session?.isActive && session?.storeId) {
-      try {
-        const shopeePeriod = period === 'last_week' ? 'past7days' : period === 'last_month' ? 'past30days' : period;
-        await Promise.allSettled([
-          shopeeService.fetchShopeeAdsMetrics({ period: shopeePeriod, storeId: session.storeId }).then((liveAds) => {
-            if (liveAds?.success) {
-              liveAdsData = liveAds;
+    const liveFetchPromise = (session?.isActive && session?.storeId)
+      ? (async () => {
+          try {
+            const shopeePeriod = period === 'last_week' ? 'past7days' : period === 'last_month' ? 'past30days' : period;
+            const liveAdsResult = await shopeeService.fetchShopeeAdsMetrics({ period: shopeePeriod, storeId: session.storeId });
+            if (liveAdsResult?.success) {
+              liveAdsData = liveAdsResult;
               if (period === 'real_time') {
-                syncService.persistAdsSnapshot(liveAds).catch(() => { });
+                syncService.persistAdsSnapshot(liveAdsResult).catch(() => { });
               }
             }
-          }),
-          shopeeService.fetchOrderSummaryRealtime(session.storeId).then(async (realtimeOrders) => {
+            const realtimeOrders = await shopeeService.fetchOrderSummaryRealtime(session.storeId);
             if (realtimeOrders?.row) {
               await shopeeService.persistOrderSummaryHistory(session.storeId, [realtimeOrders.row]);
             }
-          }),
-        ]);
-      } catch (err) {
-        console.warn('[snapshotService] Live overview background fetch error:', err.message);
-      }
-    }
+          } catch (err) {
+            console.warn('[snapshotService] Live overview background fetch error:', err.message);
+          }
+        })()
+      : Promise.resolve();
 
-    const [context, catalog, ads, warehouse, orders] = await Promise.all([
-      this.getContext(session?.storeId || storeId),
-      this.getCatalogSnapshot({ page: 1, limit: 8, sort: 'salesCount', storeId: session?.storeId || storeId }),
-      this.getAdsSnapshot({ storeId: session?.storeId || storeId }),
-      this.getWarehouseSnapshot({ page: 1, limit: 8 }),
+    const context = await this.getContext(session?.storeId || storeId);
+    await liveFetchPromise; // Pastikan live fetch selesai sebelum lanjut
+
+    const [catalog, ads, warehouse, orders] = await Promise.all([
+      this.getCatalogSnapshot({ page: 1, limit: 8, sort: 'salesCount', storeId: session?.storeId || storeId, preloadedContext: context }),
+      this.getAdsSnapshot({ storeId: session?.storeId || storeId, preloadedContext: context }),
+      this.getWarehouseSnapshot({ page: 1, limit: 8, preloadedContext: context }),
       prisma.shopeeOrderSummary.findMany({
         where: session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {}),
         orderBy: { date: 'desc' },
         take: 64,
       }),
     ]);
+
+    const { latestShopeeLog, latestAdsLog, latestWarehouseLog } = context;
 
     // Aggregation logic for periods
     const reversedAds = [...ads.history].reverse(); // Now newest first

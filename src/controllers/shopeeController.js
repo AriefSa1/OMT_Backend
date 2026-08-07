@@ -121,20 +121,14 @@ async function getSessionStatus(req, res) {
     return res.status(resolved.status).json({ success: false, error: resolved.error });
   }
 
-  const [session, allSessions, productCounts] = await Promise.all([
+  const [session, allSessions] = await Promise.all([
     shopeeService.getActiveSession(resolved.storeId, req.user),
     shopeeService.getAllSessions(req.user),
-    prisma.shopeeProduct.groupBy({
-      by: ['storeId'],
-      _count: { shopeeItemId: true },
-    }).catch(() => []),
   ]);
-
-  const countMap = new Map(productCounts.map((item) => [item.storeId, item._count.shopeeItemId]));
 
   const stores = allSessions.map((s) => ({
     ...toPublicSession(s),
-    productCount: countMap.get(s.storeId) || 0,
+    productCount: s.productCount || 0,
   }));
 
   return res.json({
@@ -152,19 +146,11 @@ async function getSessionStatus(req, res) {
 }
 
 async function getAllStores(req, res) {
-  const [allSessions, productCounts] = await Promise.all([
-    shopeeService.getAllSessions(req.user),
-    prisma.shopeeProduct.groupBy({
-      by: ['storeId'],
-      _count: { shopeeItemId: true },
-    }).catch(() => []),
-  ]);
-
-  const countMap = new Map(productCounts.map((item) => [item.storeId, item._count.shopeeItemId]));
+  const allSessions = await shopeeService.getAllSessions(req.user);
 
   const stores = allSessions.map((s) => ({
     ...toPublicSession(s),
-    productCount: countMap.get(s.storeId) || 0,
+    productCount: s.productCount || 0,
   }));
 
   return res.json({
