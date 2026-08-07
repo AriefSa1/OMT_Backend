@@ -524,3 +524,19 @@ model SyncJob {
   @@index([type])
 }
 
+/// Shopee account credential (cookie-based auth). Instead of having every user
+/// paste their cookie in the UI, credentials are managed centrally by admins
+/// via POST /api/shopee/credentials (admin-only). Each is optionally scoped
+/// to a store via `storeId`, or global when storeId is null.
+/// The raw `cookie` field is never returned by list endpoints — metadata only.
+model ShopeeCredential {
+  id        Int      @id @default(autoincrement())
+  cookie    String   @db.Text
+  storeId   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([storeId])
+  @@index([storeId])
+}
+
