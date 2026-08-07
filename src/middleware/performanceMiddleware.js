@@ -5,6 +5,12 @@
  *
  * Slow endpoint detection: this is the first line of defense for finding
  * slow Shopee API calls or N+1 query issues before users report latency.
+ *
+ * NOTE: The X-Response-Time-ms header is intentionally NOT set here. Setting
+ * headers inside res.on('finish') throws ERR_HTTP_HEADERS_SENT (headers are
+ * already flushed by the time 'finish' fires), and Express 4 does not emit a
+ * reliable 'header' event on the response object. If timing headers are needed,
+ * use the `on-headers` package or set them in each controller's response wrapper.
  */
 const SLOW_THRESHOLD_MS = Number(process.env.SLOW_THRESHOLD_MS) || 1000; // 1s default
 
@@ -26,9 +32,6 @@ function performanceLogger(req, res, next) {
         `user=${user} store=${store} ip=${req.ip}`
       );
     }
-
-    // Also emit timing header so frontend can optionally log it too
-    res.setHeader('X-Response-Time-ms', String(durationMs));
   });
 
   next();
