@@ -19,8 +19,9 @@ const { wrapHandlers } = require('../utils/asyncHandler');
 function aiEndpoint(serviceMethod, pickArgs) {
   return async function handler(req, res) {
     try {
-      const { geminiApiKey } = req.body;
-      if (geminiApiKey) aiService.setApiKey(geminiApiKey);
+      // Allow per-request override of either API key from Settings UI
+      if (req.body?.geminiApiKey) aiService.setApiKey(req.body.geminiApiKey);
+      if (req.body?.openrouterApiKey) aiService.setOpenRouterApiKey(req.body.openrouterApiKey);
       const result = await aiService[serviceMethod](pickArgs(req.body));
       return res.json(result);
     } catch (err) {

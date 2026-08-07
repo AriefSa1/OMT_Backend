@@ -4,6 +4,8 @@ const DEFAULTS = {
   storeName: process.env.STORE_NAME || '',
   cookieString: '',
   geminiApiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
+  openrouterApiKey: process.env.OPENROUTER_API_KEY || '',
+  openRouterApiKey: process.env.OPENROUTER_API_KEY || '', // backward-compat alias
   cronInterval: process.env.CRON_INTERVAL || '15m',
   warehouseLoginUrl: process.env.WAREHOUSE_LOGIN_URL || 'https://pdcgudang.et.r.appspot.com/v1/users/login',
   warehouseInventoryUrl: process.env.WAREHOUSE_INVENTORY_URL || 'https://pdcgudang.et.r.appspot.com/v1/products/list',

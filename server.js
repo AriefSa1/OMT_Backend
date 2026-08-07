@@ -153,10 +153,12 @@ async function initApp() {
     console.log(`   - Store Name: ${config.storeName || '(Not set)'}`);
     console.log(`   - Cookie Configured: ${config.cookieString ? 'YES' : 'NO'}`);
     console.log(`   - Gemini API Key Configured: ${config.geminiApiKey ? 'YES' : 'NO'}`);
+    console.log(`   - OpenRouter API Key Configured: ${config.openrouterApiKey ? 'YES' : 'NO'}`);
     console.log(`   - Cron Interval: ${config.cronInterval}`);
     console.log(`   - Warehouse Login Configured: ${config.warehouseLoginUrl && config.warehouseInventoryUrl && config.warehouseUsername && config.warehousePassword ? 'YES' : 'NO'}`);
 
     aiService.setApiKey(config.geminiApiKey);
+    aiService.setOpenRouterApiKey(config.openrouterApiKey);
     shopeeService.setCookie(config.cookieString);
     warehouseService.setWarehouseConfig({
       loginUrl: config.warehouseLoginUrl,

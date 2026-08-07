@@ -1,4 +1,17 @@
 const { GoogleGenAI } = require('@google/genai');
+const axios = require('axios');
+
+/**
+ * Free-tier fallback models via OpenRouter. Diurutkan by preference —
+ * model paling ringan dulu untuk hemat kredit.
+ * Pastikan OPENROUTER_API_KEY sudah diset di environment untuk menggunakan fallback.
+ */
+const OPENROUTER_FREE_MODELS = [
+  'google/gemma-2-9b-it',
+  'meta/llama-3-70b-instruct',
+  'google/gemini-1.5-flash',
+  'microsoft/phi-3-mini-128k',
+].filter(Boolean);
 
 /**
  * Sorts a Gemini failure into what the caller can actually do about it.
@@ -49,6 +62,8 @@ class AIService {
     this.apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
     this.modelName = 'gemini-2.5-flash';
     this.ai = this.apiKey ? new GoogleGenAI({ apiKey: this.apiKey }) : null;
+    this.openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
+    this.openrouterConfigured = Boolean(this.openrouterApiKey);
   }
 
   setApiKey(key) {
@@ -57,8 +72,72 @@ class AIService {
     console.log(`[AI Service] Gemini API key ${this.ai ? 'configured' : 'cleared'}.`);
   }
 
+  setOpenRouterApiKey(key) {
+    this.openrouterApiKey = key || '';
+    this.openrouterConfigured = Boolean(this.openrouterApiKey);
+    console.log(`[AI Service] OpenRouter API key ${this.openrouterConfigured ? 'configured' : 'cleared'}.`);
+  }
+
   isConfigured() {
     return Boolean(this.ai);
+  }
+
+  isOpenRouterConfigured() {
+    return this.openrouterConfigured;
+  }
+
+  /**
+   * Generate content via OpenRouter free-tier models (fallback when Gemini is rate-limited).
+   * Returns parsed JSON (same shape as generateJson) or throws like generateJson does.
+   */
+  async generateJsonWithOpenRouter(prompt, { maxRetries = 1 } = {}) {
+    if (!this.openrouterConfigured) return null;
+
+    for (const model of OPENROUTER_FREE_MODELS) {
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          const response = await axios.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            {
+              model,
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.7,
+              max_tokens: 8192,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${this.openrouterApiKey}`,
+                'HTTP-Referer': process.env.API_PUBLIC_BASE_URL || 'https://94media.art',
+                'X-Title': 'OMT Analytics',
+                'Content-Type': 'application/json',
+              },
+              timeout: 30000,
+            }
+          );
+
+          const choice = response.data?.choices?.[0];
+          if (!choice?.message?.content) {
+            throw new Error('No content in OpenRouter response');
+          }
+
+          const text = choice.message.content || '';
+          const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+          const parsed = JSON.parse(cleaned);
+          return parsed;
+        } catch (err) {
+          // If it's a rate-limit error and we have retries left, wait and retry
+          if (attempt < maxRetries && (err.response?.status === 429 || err.code === 'ECONNABORTED')) {
+            const wait = (attempt + 1) * 2000; // 2s, 4s
+            console.warn(`[AI Service] OpenRouter ${model} rate-limited, retrying in ${wait / 1000}s`);
+            await new Promise((resolve) => setTimeout(resolve, wait));
+            continue;
+          }
+          console.warn(`[AI Service] OpenRouter ${model} failed: ${err.message}`);
+          break; // Try next model
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -186,7 +265,23 @@ class AIService {
       return this.aiResult(parsed, trusted);
     } catch (err) {
       const code = err.aiErrorCode || 'UNKNOWN';
-      const message = code === 'RATE_LIMITED' || code === 'UNAVAILABLE' ? err.aiErrorMessage : (failMessage || err.aiErrorMessage);
+      const isTransient = code === 'RATE_LIMITED' || code === 'UNAVAILABLE';
+
+      // On transient failures (rate limit, 5xx), try OpenRouter free-tier as fallback
+      // before giving up. This keeps AI panels usable when Gemini quota is exhausted.
+      if (isTransient && this.openrouterConfigured) {
+        console.warn(`[AI Service] ${logLabel || 'Gemini'} rate-limited/unavailable, trying OpenRouter fallback...`);
+        try {
+          const orParsed = await this.generateJsonWithOpenRouter(prompt);
+          if (orParsed) {
+            return this.aiResult(orParsed, { ...trusted, provider: 'REAL_OPENROUTER_API' });
+          }
+        } catch (orErr) {
+          console.warn(`[AI Service] OpenRouter fallback also failed:`, orErr.message);
+        }
+      }
+
+      const message = isTransient ? err.aiErrorMessage : (failMessage || err.aiErrorMessage);
       console.warn(`[AI Service] ${logLabel || 'Gemini'} error (${code}): ${err.message}`);
       return this.aiFailed({ ...trusted, ...fallbackPayload }, message, code);
     }

@@ -22,6 +22,7 @@ async function getSettings(req, res) {
       shopeeOrderSummaryUrl: config.shopeeOrderSummaryUrl,
       cookieConfigured: Boolean(config.cookieString),
       geminiApiKeyConfigured: Boolean(config.geminiApiKey),
+      openRouterApiKeyConfigured: Boolean(config.openrouterApiKey || config.openRouterApiKey),
     };
 
     return res.json({
@@ -42,7 +43,8 @@ async function updateSettings(req, res) {
       cookieString, 
       rawCookie, 
       geminiApiKey, 
-      geminiKey, 
+      geminiKey,
+      openrouterApiKey,
       cronInterval, 
       warehouseUrl,
       warehouseLoginUrl,
@@ -70,6 +72,7 @@ async function updateSettings(req, res) {
       storeName,
       cookieString: targetCookie,
       geminiApiKey: targetGeminiKey,
+      openrouterApiKey, // <-- NEW: OpenRouter API key for fallback
       cronInterval,
       ...warehouseSettings,
       shopeeAdsUrl,
@@ -79,6 +82,9 @@ async function updateSettings(req, res) {
     // Immediate runtime update for active services
     if (targetGeminiKey !== undefined) {
       aiService.setApiKey(targetGeminiKey);
+    }
+    if (openrouterApiKey !== undefined) {
+      aiService.setOpenRouterApiKey(openrouterApiKey);
     }
 
     if (targetCookie !== undefined) {
