@@ -28,6 +28,7 @@ const growthIntelligenceRoutes = require('./src/routes/growthIntelligenceRoutes'
 const taskRoutes = require('./src/routes/taskRoutes');
 const adminRoutes = require('./src/routes/adminRoutes');
 const accountRoutes = require('./src/routes/accountRoutes');
+const jobQueueService = require('./src/services/jobQueueService');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -159,14 +160,27 @@ async function initApp() {
     });
 
     initCronJobs(config.cronInterval);
+    // Start background job queue worker — processes SYNC jobs asynchronously
+    // so /api/sync/run-async returns immediately instead of blocking on Shopee API calls.
+    jobQueueService.start();
   } catch (err) {
     console.error('Failed to load configuration from database on startup:', err.message);
     initCronJobs();
+    jobQueueService.start();
   }
 }
 
 initApp().then(() => {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Analytics Backend Server running on http://localhost:${PORT}`);
   });
+
+  // Graceful shutdown: stop job queue worker before exit
+  const shutdown = () => {
+    console.log('[Server] Shutting down...');
+    jobQueueService.stop();
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 });

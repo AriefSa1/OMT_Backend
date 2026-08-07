@@ -505,3 +505,22 @@ model AdminAuditLog {
   @@index([actorId])
 }
 
+// Background job queue for async sync operations (replaces blocking sync calls).
+model SyncJob {
+  id          String   @id @default(uuid())
+  type        String   // SYNC_SHOPE, SYNC_WAREHOUSE, SYNC_ALL, CONNECT_STORE
+  storeId     String?  // null = global sync (all stores)
+  status      String   @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
+  origin      String?  // MANUAL, CRON, WEBHOOK
+  payload     Json?    // optional metadata (e.g., requestedBy)
+  result      String?  // JSON-encoded result of the sync
+  error       String?  // error message if failed
+  createdAt   DateTime @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([storeId, status])
+  @@index([type])
+}
+
