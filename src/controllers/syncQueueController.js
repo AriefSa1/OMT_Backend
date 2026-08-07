@@ -25,7 +25,32 @@ async function getJob(req, res) {
   if (!job) {
     return res.status(404).json({ success: false, error: 'Job tidak ditemukan.' });
   }
-  return res.json({ success: true, job });
+
+  // Compute duration from timestamps if completed
+  let durationMs = null;
+  if (job.startedAt && job.completedAt) {
+    durationMs = new Date(job.completedAt) - new Date(job.startedAt);
+  } else if (job.startedAt && job.status === 'RUNNING') {
+    // Running job: live elapsed duration
+    durationMs = Date.now() - new Date(job.startedAt);
+  }
+
+  return res.json({
+    success: true,
+    job: {
+      id: job.id,
+      type: job.type,
+      storeId: job.storeId,
+      origin: job.origin,
+      status: job.status,
+      payload: job.payload,
+      result: job.result ? JSON.parse(job.result) : null,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      durationMs: durationMs !== null ? Math.round(durationMs) : null,
+    },
+  });
 }
 
 /**
