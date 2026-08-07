@@ -260,8 +260,14 @@ class AIService {
    * used to be copied five times.
    */
   async callGemini({ prompt, trusted = {}, fallbackPayload = {}, failMessage, logLabel }) {
+    // For rate-limited quota errors, skip Gemini retries and go straight to
+    // OpenRouter fallback — daily quota won't reset within the 30-45s retry delay.
+    // Only retry for UNAVAILABLE (5xx transient) or INVALID_RESPONSE (recoverable).
+    const skipGeminiRetry = this.openrouterConfigured;
     try {
-      const parsed = await this.generateJson(prompt);
+      const parsed = await this.generateJson(prompt, {
+        maxRetries: skipGeminiRetry ? 0 : 2,
+      });
       return this.aiResult(parsed, trusted);
     } catch (err) {
       const code = err.aiErrorCode || 'UNKNOWN';
