@@ -3,6 +3,7 @@ if (!process.env.DATABASE_URL) {
   process.env.DATABASE_URL = 'file:./dev.db';
 }
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 
 const configService = require('./src/services/configService');
@@ -69,6 +70,11 @@ const corsOptions = {
 
 app.use(securityHeaders);
 app.use(cors(corsOptions));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
+  fallthrough: false,
+  immutable: true,
+  maxAge: '7d',
+}));
 // Batasi ukuran body: dashboard hanya mengirim JSON kecil (form login, pengaturan). 1 MB
 // sudah longgar, sekaligus menutup upaya menghabiskan memori lewat payload raksasa.
 app.use(express.json({ limit: '1mb' }));

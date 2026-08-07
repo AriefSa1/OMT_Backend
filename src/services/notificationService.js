@@ -15,8 +15,9 @@ const prisma = require('../utils/prisma');
 
 const HTTP_TIMEOUT_MS = 10000;
 
-function formatText({ subject, message }) {
-  return subject ? `${subject}\n\n${message}` : message;
+function formatText({ subject, message, fileUrl }) {
+  const text = subject ? `${subject}\n\n${message}` : message;
+  return fileUrl ? `${text}\n\nLampiran: ${fileUrl}` : text;
 }
 
 const CHANNELS = {
@@ -29,7 +30,8 @@ const CHANNELS = {
     async send(destination, payload) {
       // Discord webhook: field `content`, batas 2000 karakter. Subjek ditebalkan.
       const content = payload.subject ? `**${payload.subject}**\n${payload.message}` : payload.message;
-      await axios.post(destination, { content: content.slice(0, 1990) }, { timeout: HTTP_TIMEOUT_MS });
+      const contentWithAttachment = payload.fileUrl ? `${content}\n\nLampiran: ${payload.fileUrl}` : content;
+      await axios.post(destination, { content: contentWithAttachment.slice(0, 1990) }, { timeout: HTTP_TIMEOUT_MS });
     }
   },
   telegram: {
@@ -59,6 +61,13 @@ function listChannels() {
   return Object.values(CHANNELS).map((c) => ({ id: c.id, label: c.label, available: c.available() }));
 }
 
+function getMediaUrl(filename, req = null) {
+  const encodedFilename = encodeURIComponent(filename);
+  const configuredBase = process.env.PUBLIC_BASE_URL || process.env.API_PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL;
+  const baseUrl = configuredBase || (req ? `${req.protocol}://${req.get('host')}` : 'http://localhost:5000');
+  return `${baseUrl.replace(/\/$/, '')}/uploads/notifications/${encodedFilename}`;
+}
+
 async function getConfig(userId) {
   return prisma.notificationConfig.findUnique({ where: { userId } });
 }
@@ -70,7 +79,7 @@ async function getConfig(userId) {
  *
  * @returns {Array<{channel, status, error}>}
  */
-async function sendToUser({ user, channels, subject, message, actor }) {
+async function sendToUser({ user, channels, subject, message, fileUrl, actor }) {
   const config = await getConfig(user.id);
   const requested = channels && channels.length ? channels : Object.keys(CHANNELS);
   const results = [];
@@ -90,7 +99,7 @@ async function sendToUser({ user, channels, subject, message, actor }) {
       error = `Kanal ${channel.label} belum siap di server.`;
     } else {
       try {
-        await channel.send(config[channel.configField], { subject, message });
+        await channel.send(config[channel.configField], { subject, message, fileUrl });
         status = 'SENT';
       } catch (err) {
         error = err.response?.data?.description || err.response?.data?.message || err.message;
@@ -122,4 +131,4 @@ async function sendToUser({ user, channels, subject, message, actor }) {
   return results;
 }
 
-module.exports = { CHANNELS, listChannels, getConfig, sendToUser };
+module.exports = { CHANNELS, listChannels, getConfig, sendToUser, getMediaUrl };

@@ -78,7 +78,24 @@ function validateSendBody(body) {
   if (!message) return { error: 'Pesan tidak boleh kosong.' };
   const channels = Array.isArray(body?.channels) ? body.channels.filter(Boolean) : [];
   if (!channels.length) return { error: 'Pilih minimal satu kanal.' };
-  return { message, subject: String(body?.subject || '').trim() || null, channels };
+  const fileUrl = body?.fileUrl ? String(body.fileUrl).trim() : null;
+  return { message, subject: String(body?.subject || '').trim() || null, channels, fileUrl };
+}
+
+function handleFileUpload(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'File tidak ada.' });
+  }
+  const fileUrl = notificationService.getMediaUrl(req.file.filename, req);
+  return res.json({
+    success: true,
+    data: {
+      fileUrl,
+      originalName: req.file.originalname,
+      size: req.file.size,
+      mimeType: req.file.mimetype
+    }
+  });
 }
 
 /** POST /api/admin/notifications/send — kirim pesan ke satu pengguna. */
@@ -95,6 +112,7 @@ async function sendNotification(req, res) {
     channels: parsed.channels,
     subject: parsed.subject,
     message: parsed.message,
+    fileUrl: parsed.fileUrl,
     actor: req.user
   });
 
@@ -137,5 +155,6 @@ module.exports = wrapHandlers({
   updateUserConfig,
   sendNotification,
   sendTest,
-  getLogs
+  getLogs,
+  handleFileUpload
 });
