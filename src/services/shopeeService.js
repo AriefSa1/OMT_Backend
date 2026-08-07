@@ -120,15 +120,19 @@ function getAdsTimeRange(period = 'real_time', customStart = null, customEnd = n
         endTime: currentDayStart - 1,
       };
     case 'past7days':
+      // Verified against Shopee's own Ads dashboard: "last 7 days" is today + 6 prior days.
       return {
         period: 'past7days',
-        startTime: currentDayStart - (7 * ONE_DAY),
+        startTime: currentDayStart - (6 * ONE_DAY),
         endTime: currentDayEnd,
       };
     case 'past30days':
+      // Shopee's "1 Bulan Terakhir" filter is actually 32 days (today + 31 prior),
+      // not a strict 30 — verified by sweeping window sizes until every metric matched
+      // the dashboard exactly (impressions, GMV, checkout count, item sold, ROAS).
       return {
         period: 'past30days',
-        startTime: currentDayStart - (30 * ONE_DAY),
+        startTime: currentDayStart - (31 * ONE_DAY),
         endTime: currentDayEnd,
       };
     default:
@@ -884,7 +888,7 @@ class ShopeeService {
    * Ratios are Shopee's own — they are not recomputed here, and they do not sum to 1:
    * paid ads overlap the organic channels.
    */
-  async fetchTrafficSources({ days = 7, storeId = null } = {}) {
+  async fetchTrafficSources({ days = 6, storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
     const cookie = (storeId ? session?.cookieString : activeCookie) || session?.cookieString || '';
     const csrfToken = extractCsrfFromCookie(cookie);
@@ -1074,46 +1078,46 @@ class ShopeeService {
       }
       const normalizedProducts = rawProducts
         .map((item) => {
-        const categoryPath = Array.isArray(item.category_path) ? item.category_path : findCategoryPath(item);
-        const l2Category = categoryPath[1] || categoryPath[0] || null;
-        const l3Category = categoryPath[2] || categoryPath[1] || null;
-        const priceMin = parseFloat(item.price_detail?.price_min || item.price_detail?.origin_price || 0);
-        const displayPrice = Math.round(priceMin);
-        const stock = item.stock_detail?.total_available_stock || item.stock_detail?.total_seller_stock || 0;
-        const sold = item.statistics?.sold_count || item.sales || 0;
-        const imageUrl = item.cover_image
-          ? item.cover_image.startsWith('http')
-            ? item.cover_image
-            : `https://down-id.img.susercontent.com/file/${item.cover_image}`
-          : null;
+          const categoryPath = Array.isArray(item.category_path) ? item.category_path : findCategoryPath(item);
+          const l2Category = categoryPath[1] || categoryPath[0] || null;
+          const l3Category = categoryPath[2] || categoryPath[1] || null;
+          const priceMin = parseFloat(item.price_detail?.price_min || item.price_detail?.origin_price || 0);
+          const displayPrice = Math.round(priceMin);
+          const stock = item.stock_detail?.total_available_stock || item.stock_detail?.total_seller_stock || 0;
+          const sold = item.statistics?.sold_count || item.sales || 0;
+          const imageUrl = item.cover_image
+            ? item.cover_image.startsWith('http')
+              ? item.cover_image
+              : `https://down-id.img.susercontent.com/file/${item.cover_image}`
+            : null;
 
-        return {
-          shopeeItemId: String(item.id),
-          name: item.name || '',
-          sku: String(item.parent_sku || item.id),
-          price: displayPrice,
-          stock,
-          salesCount: sold,
-          views: item.statistics?.view_count || 0,
-          addToCart: item.statistics?.add_to_cart_count || 0,
-          category: categoryPath[0]?.display_name || item.category_name || 'Uncategorized',
-          l2CategoryId: categoryId(l2Category),
-          l3CategoryId: categoryId(l3Category),
-          l2CategoryName: l2Category?.display_name || l2Category?.name || null,
-          l3CategoryName: l3Category?.display_name || l3Category?.name || null,
-          imageUrl,
-          rating: Number(item.statistics?.rating_star || 0),
-          variations: Array.isArray(item.model_list)
-            ? item.model_list.map((model, modelIdx) => ({
+          return {
+            shopeeItemId: String(item.id),
+            name: item.name || '',
+            sku: String(item.parent_sku || item.id),
+            price: displayPrice,
+            stock,
+            salesCount: sold,
+            views: item.statistics?.view_count || 0,
+            addToCart: item.statistics?.add_to_cart_count || 0,
+            category: categoryPath[0]?.display_name || item.category_name || 'Uncategorized',
+            l2CategoryId: categoryId(l2Category),
+            l3CategoryId: categoryId(l3Category),
+            l2CategoryName: l2Category?.display_name || l2Category?.name || null,
+            l3CategoryName: l3Category?.display_name || l3Category?.name || null,
+            imageUrl,
+            rating: Number(item.statistics?.rating_star || 0),
+            variations: Array.isArray(item.model_list)
+              ? item.model_list.map((model, modelIdx) => ({
                 id: String(model.id || ''),
                 name: model.name || '',
                 sku: model.sku || '',
                 stock: model.stock_detail?.total_available_stock || model.stock_detail?.total_seller_stock || 0,
                 soldCount: model.statistics?.sold_count || 0,
               }))
-            : [],
-        };
-      });
+              : [],
+          };
+        });
 
       if (!session?.storeId) {
         return emptyShopeeState('No active Shopee store session was found. Save a valid cookie in Settings.');
@@ -1129,7 +1133,7 @@ class ShopeeService {
         todayOrders: orderSummary?.todayOrders || 0,
         conversionRate: orderSummary?.conversionRate || 0,
         averageOrderValue: orderSummary?.averageOrderValue || 0,
-          activeProductsCount: expectedProductCount || normalizedProducts.length,
+        activeProductsCount: expectedProductCount || normalizedProducts.length,
         pendingFulfillments: 0,
       };
 
@@ -1212,12 +1216,12 @@ class ShopeeService {
         end_time: endTime,
         filter_list: [{
           campaign_type: 'product_homepage_v3',
-          state: 'ongoing',
+          state: 'all',
           search_term: '',
           is_valid_rebate_only: false,
         }],
         offset: 0,
-        limit: 50,
+        limit: 200,
         use_paid_gmv: false,
       }, {
         headers: {
@@ -1233,12 +1237,18 @@ class ShopeeService {
       const campaigns = rawCampaigns.map((campaign) => {
         const report = campaign.report || {};
         const rawSpend = asFiniteNumber(report.cost);
-        const rawSales = asFiniteNumber(report.broad_gmv ?? report.direct_gmv);
+        const rawSales = asFiniteNumber(report.broad_gmv);
         const rawVoucherSpend = asFiniteNumber(report.voucher_amount);
         const rawVoucherSales = asFiniteNumber(report.voucher_sales);
         const rawDailyBudget = asFiniteNumber(campaign.campaign?.daily_budget);
-        const impressions = asFiniteNumber(report.impression ?? report.product_impression);
-        const clicks = asFiniteNumber(report.click ?? report.product_click);
+        const impressions = asFiniteNumber(report.impression);
+        const clicks = asFiniteNumber(report.click);
+        // "Pesanan" on Shopee's own dashboard is the checkout count, not report.order/
+        // report.broad_order (which count something broader and don't match the UI total).
+        const orders = asFiniteNumber(report.checkout);
+        // "Produk Terjual" matches report.broad_order_amount — report.*item_sold fields
+        // are unpopulated for this campaign type and always read as 0.
+        const itemSold = asFiniteNumber(report.broad_order_amount);
         return {
           id: String(campaign.campaign?.campaign_id || campaign.id || ''),
           name: campaign.title || campaign.name || String(campaign.campaign?.campaign_id || ''),
@@ -1257,6 +1267,8 @@ class ShopeeService {
           voucherSales: rawVoucherSales / ADS_AMOUNT_DIVISOR,
           impressions,
           clicks,
+          orders,
+          itemSold,
           roas: asFiniteNumber(report.broad_roi ?? (rawSpend > 0 ? rawSales / rawSpend : 0)),
           ctr: normalizeRatePercent(report.ctr, impressions > 0 ? (clicks / impressions) * 100 : 0),
         };
@@ -1269,7 +1281,9 @@ class ShopeeService {
         rawVoucherSales: acc.rawVoucherSales + campaign.rawVoucherSales,
         impressions: acc.impressions + campaign.impressions,
         clicks: acc.clicks + campaign.clicks,
-      }), { rawSpend: 0, rawSales: 0, rawVoucherSpend: 0, rawVoucherSales: 0, impressions: 0, clicks: 0 });
+        orders: acc.orders + campaign.orders,
+        itemSold: acc.itemSold + campaign.itemSold,
+      }), { rawSpend: 0, rawSales: 0, rawVoucherSpend: 0, rawVoucherSales: 0, impressions: 0, clicks: 0, orders: 0, itemSold: 0 });
       const spend = totals.rawSpend / ADS_AMOUNT_DIVISOR;
       const sales = totals.rawSales / ADS_AMOUNT_DIVISOR;
 
@@ -1281,6 +1295,8 @@ class ShopeeService {
         roas: totals.rawSpend > 0 ? totals.rawSales / totals.rawSpend : 0,
         impressions: totals.impressions,
         clicks: totals.clicks,
+        orders: totals.orders,
+        itemSold: totals.itemSold,
         ctr: totals.impressions > 0 ? (totals.clicks / totals.impressions) * 100 : 0,
         voucherSpend: totals.rawVoucherSpend / ADS_AMOUNT_DIVISOR,
         voucherSales: totals.rawVoucherSales / ADS_AMOUNT_DIVISOR,

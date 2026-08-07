@@ -7,6 +7,7 @@ const {
   isActiveWarehouseId,
 } = require('../constants/warehouseConstants');
 const { isGiftItem } = require('../constants/catalogConstants');
+const { getPeriodSlices, aggregateAdsRows, compareAdsMetric } = require('../utils/adsPeriod');
 
 const STATUS = {
   FRESH: 'Segar',
@@ -491,7 +492,7 @@ class SnapshotService {
       // The business date is the authoritative snapshot key. Sorting only by
       // SQLite DateTime can select an older day when timestamps were migrated.
       prisma.shopeeAdsData.findMany({ where, orderBy: [{ date: 'desc' }, { dataAsOf: 'desc' }], take: 1 }),
-      prisma.shopeeAdsData.findMany({ where, orderBy: { date: 'desc' }, take: 30 }),
+      prisma.shopeeAdsData.findMany({ where, orderBy: { date: 'desc' }, take: 64 }),
     ]);
     const latestSnapshot = latest[0] || null;
     const campaignWhere = latestSnapshot && session?.storeId ? { storeId: session.storeId, date: latestSnapshot.date } : { id: '__missing__' };
@@ -532,6 +533,8 @@ class SnapshotService {
       impressions: latestSnapshot ? number(latestSnapshot.impressions) : null,
       clicks: latestSnapshot ? number(latestSnapshot.clicks) : null,
       ctr: latestSnapshot ? normalizeRate(latestSnapshot.ctr) : null,
+      orders: latestSnapshot ? number(latestSnapshot.orders) : null,
+      itemSold: latestSnapshot ? number(latestSnapshot.itemSold) : null,
       voucherSpend: latestSnapshot ? number(latestSnapshot.voucherSpend) : null,
       voucherSales: latestSnapshot ? number(latestSnapshot.voucherSales) : null,
       amountAudit: latestSnapshot ? {
@@ -552,6 +555,8 @@ class SnapshotService {
         // Dibutuhkan dashboard untuk kartu impresi/klik dan pembandingnya terhadap kemarin.
         impressions: number(row.impressions),
         clicks: number(row.clicks),
+        orders: number(row.orders),
+        itemSold: number(row.itemSold),
         dataAsOf: row.dataAsOf,
       })),
       meta,
@@ -974,16 +979,24 @@ class SnapshotService {
     };
   }
 
-  async getDashboardOverview(storeId = null) {
+  async getDashboardOverview(storeId = null, period = 'real_time') {
     const shopeeService = require('./shopeeService');
     const syncService = require('./syncService');
     const session = await shopeeService.getActiveSession(storeId);
 
+    let liveAdsData = null;
+
     if (session?.isActive && session?.storeId) {
       try {
+        const shopeePeriod = period === 'last_week' ? 'past7days' : period === 'last_month' ? 'past30days' : period;
         await Promise.allSettled([
-          shopeeService.fetchShopeeAdsMetrics({ period: 'real_time', storeId: session.storeId }).then((liveAds) => {
-            if (liveAds?.success) syncService.persistAdsSnapshot(liveAds).catch(() => {});
+          shopeeService.fetchShopeeAdsMetrics({ period: shopeePeriod, storeId: session.storeId }).then((liveAds) => {
+            if (liveAds?.success) {
+              liveAdsData = liveAds;
+              if (period === 'real_time') {
+                syncService.persistAdsSnapshot(liveAds).catch(() => { });
+              }
+            }
           }),
           shopeeService.fetchOrderSummaryRealtime(session.storeId).then(async (realtimeOrders) => {
             if (realtimeOrders?.row) {
@@ -1004,12 +1017,51 @@ class SnapshotService {
       prisma.shopeeOrderSummary.findMany({
         where: session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {}),
         orderBy: { date: 'desc' },
-        take: 30,
+        take: 64,
       }),
     ]);
-    const latestOrder = orders[0] || null;
-    // Computed before salesTrend, which reverses `orders` in place.
-    const cancellationRows = orders.filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
+
+    // Aggregation logic for periods
+    const reversedAds = [...ads.history].reverse(); // Now newest first
+    const orderSlices = getPeriodSlices(period, orders);
+    const adsSlices = getPeriodSlices(period, reversedAds);
+    const { current: currentOrders, previous: previousOrders } = orderSlices;
+    const { current: currentAds, previous: previousAds } = adsSlices;
+
+    const aggregateOrders = (rows) => {
+      if (!rows || rows.length === 0) return null;
+      const gmv = rows.reduce((sum, r) => sum + number(r.gmv), 0);
+      const orderCount = rows.reduce((sum, r) => sum + number(r.orderCount), 0);
+      const avgConv = rows.reduce((sum, r) => sum + number(r.conversionRate), 0) / rows.length;
+      const avgAov = orderCount > 0 ? gmv / orderCount : 0;
+      const dateStr = rows.length === 1 ? rows[0].date : `${rows[rows.length - 1].date} - ${rows[0].date}`;
+      return { gmv, orderCount, conversionRate: avgConv, averageOrderValue: avgAov, date: dateStr };
+    };
+
+    const aggregateAds = aggregateAdsRows;
+
+    const latestOrder = aggregateOrders(currentOrders);
+    const previousOrder = aggregateOrders(previousOrders);
+    let adsToday;
+    if (liveAdsData) {
+      adsToday = {
+        spend: number(liveAdsData.totalSpend),
+        sales: number(liveAdsData.totalSalesGenerated),
+        roas: number(liveAdsData.roas),
+        impressions: number(liveAdsData.impressions),
+        clicks: number(liveAdsData.clicks),
+        orders: number(liveAdsData.orders),
+        itemSold: number(liveAdsData.itemSold),
+        ctr: liveAdsData.impressions > 0 ? (number(liveAdsData.clicks) / number(liveAdsData.impressions)) * 100 : 0,
+        date: period === 'real_time' ? dateKey() : (period === 'yesterday' ? shiftDateKey(dateKey(), -1) : period),
+      };
+    } else {
+      adsToday = aggregateAds(currentAds);
+    }
+    const adsYesterday = aggregateAds(previousAds);
+
+    // Order Quality still uses the last 30 days available
+    const cancellationRows = orders.slice(0, 30).filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
     const sumField = (rows, field) => rows.reduce((total, row) => total + number(row[field]), 0);
     const orderQuality = {
       days: cancellationRows.length,
@@ -1034,44 +1086,32 @@ class SnapshotService {
         : 'Data pembatalan dan retur belum tersimpan. Jalankan Sync untuk mengambilnya dari Seller Center.',
     };
     // Pembanding hari-ke-hari untuk kartu statistik harian.
-    //
-    // `orders` masih terurut menurun (terbaru dulu) pada titik ini; `ads.history` sudah
-    // menaik (terlama dulu). Baris "kemarin" diambil sebagai baris kedua dari masing-masing,
-    // bukan dengan mengurangi tanggal — kalau satu hari tidak tersimpan, pembandingnya
-    // adalah hari tersimpan sebelumnya, dan tanggalnya ikut dilaporkan supaya jelas.
-    const previousOrder = orders[1] || null;
-    const adsToday = ads.history[ads.history.length - 1] || null;
-    const adsYesterday = ads.history[ads.history.length - 2] || null;
-    const compare = (current, previous) => {
-      if (current === null || current === undefined || previous === null || previous === undefined) {
-        return { current: current ?? null, previous: previous ?? null, direction: null, changePercent: null };
-      }
-      const delta = number(current) - number(previous);
-      return {
-        current: number(current),
-        previous: number(previous),
-        direction: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
-        changePercent: number(previous) === 0 ? null : (delta / Math.abs(number(previous))) * 100,
-      };
-    };
+    const compare = compareAdsMetric;
     // Hari berjalan belum selesai. Membandingkannya dengan kemarin yang penuh akan
     // SELALU terlihat turun — itu artefak jam, bukan penurunan performa. Ditandai supaya
     // UI dapat mengatakannya, bukan menampilkan panah merah tanpa konteks.
+    // If period is not real_time, it is a completed period.
     const currentDate = latestOrder?.date || adsToday?.date || null;
     const kpiTrend = {
       currentDate,
-      currentIsPartial: currentDate === dateKey(),
+      currentIsPartial: period === 'real_time' && currentDate === dateKey(),
       previousDate: previousOrder?.date || adsYesterday?.date || null,
+      // Metrik toko (semua sumber, bukan hanya iklan).
       gmv: compare(latestOrder ? number(latestOrder.gmv) : null, previousOrder ? number(previousOrder.gmv) : null),
       orders: compare(latestOrder ? number(latestOrder.orderCount) : null, previousOrder ? number(previousOrder.orderCount) : null),
-      roas: compare(adsToday ? number(adsToday.roas) : null, adsYesterday ? number(adsYesterday.roas) : null),
-      adSpend: compare(adsToday ? number(adsToday.spend) : null, adsYesterday ? number(adsYesterday.spend) : null),
-      impressions: compare(adsToday ? number(adsToday.impressions) : null, adsYesterday ? number(adsYesterday.impressions) : null),
-      clicks: compare(adsToday ? number(adsToday.clicks) : null, adsYesterday ? number(adsYesterday.clicks) : null),
+      // Metrik iklan — penamaan mengikuti kpis.ads* agar setiap kartu iklan punya trend sendiri.
+      adsImpressions: compare(adsToday ? number(adsToday.impressions) : null, adsYesterday ? number(adsYesterday.impressions) : null),
+      adsClicks: compare(adsToday ? number(adsToday.clicks) : null, adsYesterday ? number(adsYesterday.clicks) : null),
+      adsCtr: compare(adsToday ? number(adsToday.ctr) : null, adsYesterday ? number(adsYesterday.ctr) : null),
+      adsOrders: compare(adsToday ? number(adsToday.orders) : null, adsYesterday ? number(adsYesterday.orders) : null),
+      adsItemSold: compare(adsToday ? number(adsToday.itemSold) : null, adsYesterday ? number(adsYesterday.itemSold) : null),
+      adsSales: compare(adsToday ? number(adsToday.sales) : null, adsYesterday ? number(adsYesterday.sales) : null),
+      adsSpend: compare(adsToday ? number(adsToday.spend) : null, adsYesterday ? number(adsYesterday.spend) : null),
+      adsRoas: compare(adsToday ? number(adsToday.roas) : null, adsYesterday ? number(adsYesterday.roas) : null),
     };
 
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
-    const salesTrend = orders.reverse().map((row) => {
+    const salesTrend = orders.slice(0, 30).reverse().map((row) => {
       const adRow = adByDate.get(row.date);
       return {
         day: row.date,
@@ -1124,14 +1164,22 @@ class SnapshotService {
       lastSyncedAt: maxDate([context.latestShopeeLog?.timestamp, context.latestAdsLog?.timestamp, context.latestWarehouseLog?.timestamp]),
       dataState: { catalog: catalog.meta, ads: ads.meta, warehouse: warehouse.meta },
       kpis: {
+        // Ads KPIs to match exactly with Shopee Dashboard
+        adsImpressions: adsToday?.impressions ?? null,
+        adsClicks: adsToday?.clicks ?? null,
+        adsCtr: adsToday?.ctr ?? null,
+        adsOrders: adsToday?.orders ?? null,
+        adsItemSold: adsToday?.itemSold ?? null,
+        adsSales: adsToday?.sales ?? null,
+        adsSpend: adsToday?.spend ?? null,
+        adsRoas: adsToday?.roas ?? null,
+
+        // General KPIs
         totalGmv: latestOrder ? number(latestOrder.gmv) : null,
         totalOrders: latestOrder ? number(latestOrder.orderCount) : null,
         conversionRate: latestOrder ? normalizeRate(latestOrder.conversionRate) : null,
         averageOrderValue: latestOrder ? number(latestOrder.averageOrderValue) : null,
-        roas: ads.roas,
-        adSpend: ads.totalSpend,
-        impressions: ads.impressions,
-        clicks: ads.clicks,
+
         // A disconnected or never-synced warehouse has no measurement, so these are
         // null rather than 0 — matching how the order KPIs above already behave.
         warehouseUnits: warehouseMeasured ? warehouse.totals.totalAvailableUnits : null,

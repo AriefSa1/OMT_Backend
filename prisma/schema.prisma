@@ -165,6 +165,8 @@ model ShopeeAdsData {
   impressions Int
   clicks      Int
   ctr         Float
+  orders      Int      @default(0)
+  itemSold    Int      @default(0)
   rawSpend    Float    @default(0)
   rawSales    Float    @default(0)
   rawVoucherSpend Float @default(0)

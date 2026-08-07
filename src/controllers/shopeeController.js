@@ -5,6 +5,7 @@ const snapshotService = require('../services/snapshotService');
 const syncService = require('../services/syncService');
 const prisma = require('../utils/prisma');
 const { wrapHandlers } = require('../utils/asyncHandler');
+const { getPeriodSlices, aggregateAdsRows, compareAdsMetric } = require('../utils/adsPeriod');
 
 function toPublicAnalysis(analysis) {
   return {
@@ -404,20 +405,50 @@ async function getShopeeAds(req, res) {
           return (leftValue > rightValue ? 1 : -1) * (ascending ? 1 : -1);
         });
 
-        const dbHistory = await prisma.shopeeAdsData.findMany({
+        // take: 64 so getPeriodSlices has enough rows for the past30days (32-day) comparison.
+        const dbHistoryDesc = await prisma.shopeeAdsData.findMany({
           where: { storeId: targetStoreId },
           orderBy: { date: 'desc' },
-          take: 30,
+          take: 64,
         });
 
-        const history = dbHistory.reverse().map((row) => ({
+        const history = [...dbHistoryDesc].reverse().map((row) => ({
           date: row.date,
           spend: Number(row.spend || 0),
           sales: Number(row.sales || 0),
           roas: Number(row.roas || 0),
           ctr: Number(row.ctr || 0),
+          impressions: Number(row.impressions || 0),
+          clicks: Number(row.clicks || 0),
+          orders: Number(row.orders || 0),
+          itemSold: Number(row.itemSold || 0),
           dataAsOf: row.dataAsOf,
         }));
+
+        // "Current" is the live-fetched total for the selected period; "previous" is the
+        // equal-length period immediately before it, aggregated from persisted daily snapshots
+        // (there's no live equivalent for a past period). Same convention as the dashboard.
+        const { previous: previousRows } = getPeriodSlices(period, dbHistoryDesc);
+        const previousAgg = aggregateAdsRows(previousRows.map((row) => ({
+          date: row.date,
+          spend: Number(row.spend || 0),
+          sales: Number(row.sales || 0),
+          impressions: Number(row.impressions || 0),
+          clicks: Number(row.clicks || 0),
+          orders: Number(row.orders || 0),
+          itemSold: Number(row.itemSold || 0),
+        })));
+        const trend = {
+          previousDate: previousAgg?.date || null,
+          impressions: compareAdsMetric(liveData.impressions, previousAgg?.impressions ?? null),
+          clicks: compareAdsMetric(liveData.clicks, previousAgg?.clicks ?? null),
+          ctr: compareAdsMetric(liveData.ctr, previousAgg?.ctr ?? null),
+          orders: compareAdsMetric(liveData.orders, previousAgg?.orders ?? null),
+          itemSold: compareAdsMetric(liveData.itemSold, previousAgg?.itemSold ?? null),
+          sales: compareAdsMetric(liveData.totalSalesGenerated, previousAgg?.sales ?? null),
+          spend: compareAdsMetric(liveData.totalSpend, previousAgg?.spend ?? null),
+          roas: compareAdsMetric(liveData.roas, previousAgg?.roas ?? null),
+        };
 
         const meta = {
           status: 'Segar',
@@ -435,6 +466,8 @@ async function getShopeeAds(req, res) {
           impressions: liveData.impressions,
           clicks: liveData.clicks,
           ctr: liveData.ctr,
+          orders: liveData.orders,
+          itemSold: liveData.itemSold,
           voucherSpend: liveData.voucherSpend,
           voucherSales: liveData.voucherSales,
           amountAudit: {
@@ -447,6 +480,7 @@ async function getShopeeAds(req, res) {
           topCampaigns: sortedCampaigns,
           sort: { sortBy: sortField, direction: ascending ? 'asc' : 'desc' },
           history,
+          trend,
           period: liveData.period,
           meta,
           dataSource: 'SHOPEE_API',

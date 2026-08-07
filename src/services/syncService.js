@@ -176,6 +176,8 @@ class SyncService {
       impressions: number(metrics.impressions),
       clicks: number(metrics.clicks),
       ctr: normalizeRate(metrics.ctr),
+      orders: number(metrics.orders),
+      itemSold: number(metrics.itemSold),
       rawSpend: number(metrics.rawSpend),
       rawSales: number(metrics.rawSales),
       rawVoucherSpend: number(metrics.rawVoucherSpend),
@@ -608,8 +610,14 @@ class SyncService {
   async syncAll({ origin = 'MANUAL', storeId = null } = {}) {
     const locked = await syncLockService.runExclusive(async () => {
       const startedAt = new Date();
-      const shopee = await this.syncShopee({ origin, storeId });
-      const ads = await this.syncAds({ origin, storeId });
+      // Katalog Shopee dan Iklan menyentuh endpoint berbeda dan tabel berbeda, jadi tidak
+      // saling bergantung — dijalankan berbarengan agar waktu tunggu total ± separuhnya.
+      // Gudang tetap SETELAH keduanya: rekonsiliasi membandingkan stok gudang terhadap
+      // katalog Shopee yang baru saja dipersist, jadi ia butuh katalog sudah tersimpan.
+      const [shopee, ads] = await Promise.all([
+        this.syncShopee({ origin, storeId }),
+        this.syncAds({ origin, storeId }),
+      ]);
       const warehouse = await this.syncWarehouse({ origin, skipLock: true });
       const results = [shopee, ads, warehouse];
       const successCount = results.filter((result) => result.success).length;
