@@ -5,6 +5,8 @@ if (!process.env.DATABASE_URL) {
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
+const compression = require('compression');
+const { performanceLogger } = require('./src/middleware/performanceMiddleware');
 
 const configService = require('./src/services/configService');
 const aiService = require('./src/services/aiService');
@@ -71,6 +73,11 @@ const corsOptions = {
 
 app.use(securityHeaders);
 app.use(cors(corsOptions));
+app.use(performanceLogger); // Log requests exceeding SLOW_THRESHOLD_MS
+// Enable gzip/brotli compression for JSON responses. Catalog and order-history
+// endpoints return large JSON payloads; compression typically shrinks 100KB+
+// responses to ~15-25KB, cutting bandwidth and client parse time significantly.
+app.use(compression({ threshold: 1024 }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), {
   fallthrough: false,
   immutable: true,
