@@ -89,8 +89,6 @@ class JobQueueService {
         where: { status: 'RUNNING', startedAt: { lt: staleThreshold } },
         data: { status: 'PENDING', startedAt: null },
       });
-
-      // 2. Claim the next PENDING job
       const next = await tx.syncJob.findFirst({
         where: { status: 'PENDING' },
         orderBy: [{ createdAt: 'asc' }, { type: 'asc' }],
@@ -115,7 +113,7 @@ class JobQueueService {
         where: { id: next.id },
         data: { status: 'RUNNING', startedAt: now },
       });
-    });
+    }, { timeout: 30000 });
 
     if (!job) return false;
 
