@@ -12,6 +12,8 @@ const {
   updateProductEconomics,
   getShopeeAds,
   getProductPerformance,
+  getProductOverview,
+  getProductTrends,
   getTrafficSources,
   triggerSync,
   validateCookie,
@@ -35,6 +37,8 @@ router.get('/product/:id', getProductDetail);
 router.put('/product/:id/economics', updateProductEconomics);
 router.get('/ads', getShopeeAds);
 router.get('/product-performance', getProductPerformance);
+router.get('/product-overview', getProductOverview);
+router.get('/product-trends', getProductTrends);
 router.get('/traffic-sources', getTrafficSources);
 router.post('/sync', triggerSync);
 router.get('/validate-cookie', validateCookie);

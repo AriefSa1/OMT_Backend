@@ -6,6 +6,26 @@ const syncService = require('../services/syncService');
 const prisma = require('../utils/prisma');
 const { wrapHandlers } = require('../utils/asyncHandler');
 const { getPeriodSlices, aggregateAdsRows, compareAdsMetric } = require('../utils/adsPeriod');
+const { resolveRange, derivePeriod } = require('../utils/dateRange');
+
+/**
+ * Ambil rentang waktu (epoch detik) dari query. Prioritas: date range picker
+ * (start_date/end_date, ISO) → dikonversi WIB oleh util. Jika tak ada, pakai epoch
+ * mentah lama (start_time/end_time) bila dikirim. Mengembalikan undefined bila kosong,
+ * agar service jatuh ke perilaku default (days/period).
+ */
+function rangeFromQuery(query = {}) {
+  const startDate = query.start_date || query.startDate;
+  const endDate = query.end_date || query.endDate;
+  if (startDate && endDate) {
+    const { start, end } = resolveRange({ startDate, endDate, unit: 'sec' });
+    return { startTime: start, endTime: end };
+  }
+  return {
+    startTime: query.start_time ? Number(query.start_time) : undefined,
+    endTime: query.end_time ? Number(query.end_time) : undefined,
+  };
+}
 
 function toPublicAnalysis(analysis) {
   return {
@@ -360,10 +380,11 @@ async function getShopeeAds(req, res) {
 
   if (force_snapshot !== 'true') {
     try {
+      const { startTime: adsStart, endTime: adsEnd } = rangeFromQuery(req.query);
       const liveData = await shopeeService.fetchShopeeAdsMetrics({
         period,
-        startTime: start_time,
-        endTime: end_time,
+        startTime: adsStart,
+        endTime: adsEnd,
         storeId: targetStoreId,
       });
 
@@ -556,10 +577,11 @@ async function getProductPerformance(req, res) {
       });
     }
 
+    const { startTime: ppStart, endTime: ppEnd } = rangeFromQuery(req.query);
     const request = {
       period,
-      startTime: start_time,
-      endTime: end_time,
+      startTime: ppStart,
+      endTime: ppEnd,
       keyword,
       categoryType: category_type,
       categoryId: category_id,
@@ -612,11 +634,54 @@ async function getTrafficSources(req, res) {
     });
   }
 
+  const { startTime, endTime } = rangeFromQuery(req.query);
   const result = await shopeeService.fetchTrafficSources({
     days: Number(req.query.days) || 7,
+    startTime,
+    endTime,
     storeId: resolved.storeId,
   });
 
+  return res.json({ success: result.source === 'SHOPEE_API', ...result });
+}
+
+/**
+ * GET /api/shopee/product-overview — ringkasan funnel produk (KPI + delta).
+ */
+async function getProductOverview(req, res) {
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+  if (resolved.error) return res.status(resolved.status).json({ success: false, error: resolved.error });
+  if (!resolved.storeId) {
+    return res.json({ success: true, source: 'EMPTY', metrics: null, message: 'Tidak ada toko terhubung untuk akun Anda.' });
+  }
+
+  const { startTime, endTime } = rangeFromQuery(req.query);
+  const period = req.query.period
+    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
+    || 'day';
+
+  const result = await shopeeService.fetchProductOverview({ startTime, endTime, period, storeId: resolved.storeId });
+  return res.json({ success: result.source === 'SHOPEE_API', ...result });
+}
+
+/**
+ * GET /api/shopee/product-trends — time series metrik funnel produk.
+ */
+async function getProductTrends(req, res) {
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+  if (resolved.error) return res.status(resolved.status).json({ success: false, error: resolved.error });
+  if (!resolved.storeId) {
+    return res.json({ success: true, source: 'EMPTY', series: {}, message: 'Tidak ada toko terhubung untuk akun Anda.' });
+  }
+
+  const { startTime, endTime } = rangeFromQuery(req.query);
+  const period = req.query.period
+    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
+    || 'day';
+
+  const result = await shopeeService.fetchProductMetricTrends({ startTime, endTime, period, storeId: resolved.storeId });
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
 }
 
@@ -632,6 +697,8 @@ module.exports = {
     updateProductEconomics,
     getShopeeAds,
     getProductPerformance,
+    getProductOverview,
+    getProductTrends,
     getTrafficSources,
     triggerSync,
     validateCookie,

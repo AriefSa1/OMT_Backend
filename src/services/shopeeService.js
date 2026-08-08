@@ -28,6 +28,11 @@ const SHOPEE_ORDER_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydat
 // Endpoint ini per-produk (satu request per item), jadi hanya dipanggil untuk produk yang
 // kategorinya memang belum diketahui.
 const SHOPEE_PRODUCT_INFO_ENDPOINT = 'https://seller.shopee.co.id/api/v3/product/get_product_info';
+// Ringkasan funnel toko (pengunjung → ATC → dipesan → dikonfirmasi → dibayar) + delta
+// vs periode sebelumnya. Lebih kaya dari key-metrics; dipakai sebagai sumber KPI dashboard.
+const SHOPEE_PRODUCT_OVERVIEW_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v2/product/overview/';
+// Versi time-series dari overview: tiap metrik → array {timestamp, value}.
+const SHOPEE_PRODUCT_OVERVIEW_TRENDS_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v2/product/overview/metric-trends/';
 const ADS_AMOUNT_DIVISOR = 100000;
 const SHOPEE_ORDER_BY = {
   'confirmed_sales.desc': 'confirmed_sales.desc',
@@ -744,7 +749,7 @@ class ShopeeService {
     }
   }
 
-  async fetchOrderSummaryHistory({ days = 30, includeToday = true, cookie: customCookie = '', storeId = null } = {}) {
+  async fetchOrderSummaryHistory({ days = 30, includeToday = true, startTime, endTime: endTimeArg, cookie: customCookie = '', storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
     const cookie = await this._resolveCookie({ customCookie, storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
@@ -752,14 +757,17 @@ class ShopeeService {
       return { source: 'EMPTY', rows: [], message: 'Simpan cookie Shopee yang valid di Pengaturan sebelum mengambil ringkasan pesanan.' };
     }
 
-    const safeDays = Math.min(30, Math.max(1, Number(days) || 30));
-    const endTime = Math.floor(Date.now() / 1000);
+    // Rentang eksplisit (date range picker) menang; jika tidak, pakai `days` seperti dulu.
+    const hasRange = Number(startTime) > 0 && Number(endTimeArg) > 0;
+    const endTime = hasRange ? Number(endTimeArg) : Math.floor(Date.now() / 1000);
+    const startTimeResolved = hasRange ? Number(startTime) : endTime - Math.min(30, Math.max(1, Number(days) || 30)) * 86400;
+    const spanDays = Math.max(1, Math.round((endTime - startTimeResolved) / 86400));
     const params = new URLSearchParams({
       SPC_CDS: csrfToken,
       SPC_CDS_VER: '2',
-      start_time: String(endTime - safeDays * 86400),
+      start_time: String(startTimeResolved),
       end_time: String(endTime),
-      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      period: spanDays <= 7 ? 'past7days' : 'past30days',
       fetag: 'datacenter_overview',
     });
 
@@ -842,20 +850,22 @@ class ShopeeService {
    * it does not publish the denominator it uses for a cancellation *rate*, so none is
    * derived here — the figures stay as measured.
    */
-  async fetchOrderPerformanceHistory({ days = 30, cookie: customCookie = '', storeId = null } = {}) {
+  async fetchOrderPerformanceHistory({ days = 30, startTime, endTime: endTimeArg, cookie: customCookie = '', storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
     const cookie = await this._resolveCookie({ customCookie, storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
     if (!cookie || !csrfToken) return { source: 'EMPTY', rows: [], message: 'Sesi Shopee tidak tersedia.' };
 
-    const safeDays = Math.min(30, Math.max(1, Number(days) || 30));
-    const endTime = Math.floor(Date.now() / 1000);
+    const hasRange = Number(startTime) > 0 && Number(endTimeArg) > 0;
+    const endTime = hasRange ? Number(endTimeArg) : Math.floor(Date.now() / 1000);
+    const startTimeResolved = hasRange ? Number(startTime) : endTime - Math.min(30, Math.max(1, Number(days) || 30)) * 86400;
+    const spanDays = Math.max(1, Math.round((endTime - startTimeResolved) / 86400));
     const params = new URLSearchParams({
       SPC_CDS: csrfToken,
       SPC_CDS_VER: '2',
-      start_time: String(endTime - safeDays * 86400),
+      start_time: String(startTimeResolved),
       end_time: String(endTime),
-      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      period: spanDays <= 7 ? 'past7days' : 'past30days',
       order_type: 'confirmed',
     });
 
@@ -909,7 +919,7 @@ class ShopeeService {
    * Ratios are Shopee's own — they are not recomputed here, and they do not sum to 1:
    * paid ads overlap the organic channels.
    */
-  async fetchTrafficSources({ days = 6, storeId = null } = {}) {
+  async fetchTrafficSources({ days = 6, startTime, endTime: endTimeArg, storeId = null } = {}) {
     const session = await this.getActiveSession(storeId);
     const cookie = await this._resolveCookie({ storeId, session });
     const csrfToken = extractCsrfFromCookie(cookie);
@@ -917,14 +927,18 @@ class ShopeeService {
       return { source: 'EMPTY', channels: [], message: 'Simpan cookie Shopee yang valid di Pengaturan untuk melihat sumber kunjungan.' };
     }
 
-    const safeDays = Math.min(30, Math.max(1, Number(days) || 7));
-    const endTime = Math.floor(Date.now() / 1000);
+    // Rentang eksplisit (dari date range picker) diprioritaskan; jika tidak ada,
+    // jatuh ke perilaku lama berbasis `days`.
+    const hasRange = Number(startTime) > 0 && Number(endTimeArg) > 0;
+    const endTime = hasRange ? Number(endTimeArg) : Math.floor(Date.now() / 1000);
+    const startTimeResolved = hasRange ? Number(startTime) : endTime - Math.min(30, Math.max(1, Number(days) || 7)) * 86400;
+    const spanDays = Math.max(1, Math.round((endTime - startTimeResolved) / 86400));
     const params = new URLSearchParams({
       SPC_CDS: csrfToken,
       SPC_CDS_VER: '2',
-      start_time: String(endTime - safeDays * 86400),
+      start_time: String(startTimeResolved),
       end_time: String(endTime),
-      period: safeDays <= 7 ? 'past7days' : 'past30days',
+      period: spanDays <= 7 ? 'past7days' : 'past30days',
       order_type: 'confirmed',
     });
 
@@ -1024,6 +1038,104 @@ class ShopeeService {
       message: summary.message,
       cancellationMessage: performance.message,
     };
+  }
+
+  /**
+   * Ringkasan funnel produk (product/overview). Mengembalikan objek metrik datar,
+   * tiap metrik { value, ratio } (ratio = delta vs periode sebelumnya, pecahan).
+   * Toleran envelope: bisa {code,msg,result:{...}} atau objek metrik langsung.
+   */
+  async fetchProductOverview({ startTime, endTime, period = 'day', cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', metrics: null, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const end = Number(endTime) || now;
+    const start = Number(startTime) || (end - 86400);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(start),
+      end_time: String(end),
+      period,
+    });
+
+    try {
+      const response = await shopeeRequest({
+        method: 'get',
+        url: `${SHOPEE_PRODUCT_OVERVIEW_ENDPOINT}?${params}`,
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 12000,
+      });
+      const payload = response.data ?? {};
+      const result = (payload && typeof payload === 'object' && 'result' in payload) ? payload.result : payload;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        return { source: 'EMPTY', metrics: null, message: payload?.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak product overview.' };
+      }
+      return { source: 'SHOPEE_API', metrics: result, period, message: null };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        metrics: null,
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini. Perbarui cookie di Pengaturan.'
+          : status ? `Product overview mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
+  }
+
+  /**
+   * Time-series funnel produk (product/overview/metric-trends). Envelope standar
+   * {code,msg,result}, result = { metrik: [{timestamp, value}] }. Dikembalikan apa
+   * adanya (raw) — konversi satuan/skala rate dilakukan di sisi tampilan.
+   */
+  async fetchProductMetricTrends({ startTime, endTime, period = 'day', cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', series: {}, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const end = Number(endTime) || now;
+    const start = Number(startTime) || (end - 86400);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(start),
+      end_time: String(end),
+      period,
+    });
+
+    try {
+      const response = await shopeeRequest({
+        method: 'get',
+        url: `${SHOPEE_PRODUCT_OVERVIEW_TRENDS_ENDPOINT}?${params}`,
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data ?? {};
+      const result = (payload && typeof payload === 'object' && 'result' in payload) ? payload.result : payload;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        return { source: 'EMPTY', series: {}, message: payload?.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak metric trends.' };
+      }
+      return { source: 'SHOPEE_API', series: result, period, message: null };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        series: {},
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini. Perbarui cookie di Pengaturan.'
+          : status ? `Metric trends mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
   }
 
   async fetchLiveShopeeMetrics(customCookie = '', storeId = null) {
