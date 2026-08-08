@@ -213,6 +213,30 @@ async function setActiveStore(req, res) {
   });
 }
 
+async function updateStoreMarketplace(req, res) {
+  const { storeId } = req.params;
+  const { marketplaceId, marketplaceName, marketplaceType } = req.body;
+  if (!storeId) {
+    return res.status(400).json({ success: false, error: 'storeId wajib diisi.' });
+  }
+
+  const target = await prisma.storeSession.findUnique({ where: { storeId: String(storeId) } });
+  if (!target) {
+    return res.status(404).json({ success: false, error: 'Toko tidak ditemukan.' });
+  }
+  if (req.user.role !== 'ADMIN' && target.userId && target.userId !== req.user.id) {
+    return res.status(403).json({ success: false, error: 'Akses ditolak: Anda bukan pemilik toko ini.' });
+  }
+
+  const updated = await shopeeService.updateSession(storeId, {
+    marketplaceId: marketplaceId === '' || marketplaceId === null || marketplaceId === undefined ? null : Number(marketplaceId),
+    marketplaceName: marketplaceName || null,
+    marketplaceType: marketplaceType || null,
+  });
+
+  return res.json({ success: true, session: toPublicSession(updated) });
+}
+
 async function deleteStoreSession(req, res) {
   const { storeId } = req.params;
   if (!storeId) {
@@ -745,6 +769,7 @@ module.exports = {
     getSessionStatus,
     getAllStores,
     setActiveStore,
+    updateStoreMarketplace,
     deleteStoreSession,
     getShopeeMetrics,
     getProductDetail,

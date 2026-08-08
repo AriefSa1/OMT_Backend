@@ -6,6 +6,7 @@ const {
   getSessionStatus,
   getAllStores,
   setActiveStore,
+  updateStoreMarketplace,
   deleteStoreSession,
   getShopeeMetrics,
   getProductDetail,
@@ -33,6 +34,7 @@ router.post('/cookie', parseCookie);
 router.get('/session', getSessionStatus);
 router.get('/stores', getAllStores);
 router.post('/stores/active', setActiveStore);
+router.put('/stores/:storeId/marketplace', updateStoreMarketplace);
 router.delete('/stores/:storeId', deleteStoreSession);
 router.get('/metrics', getShopeeMetrics);
 router.get('/product/:id', getProductDetail);
