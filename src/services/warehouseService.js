@@ -658,9 +658,17 @@ class WarehouseService {
    */
   async fetchMarketplacePerformance({ timeMin, timeMax, from = 'selling', page = 1, limit = 20, orderDesc = true } = {}) {
     try {
+      await this.ensureConfigLoaded();
+      // Login dulu supaya this.teamId/userId terisi SEBELUM membangun query — kalau
+      // tidak, domain_id/team_id kosong dan Gudang membalas 400.
+      await this.getAccessToken();
+
       const origin = new URL(this.loginUrl || 'https://pdcgudang.et.r.appspot.com').origin;
       const teamId = process.env.WAREHOUSE_TEAM_ID || this.teamId || '';
       const domainId = process.env.WAREHOUSE_DOMAIN_ID || teamId;
+      if (!teamId) {
+        return { source: 'EMPTY', rows: [], raw: null, message: 'team_id Gudang tidak diketahui (login gudang belum terkonfigurasi). Set WAREHOUSE_TEAM_ID atau lengkapi kredensial gudang.' };
+      }
       const params = new URLSearchParams({
         from,
         domain_id: String(domainId),
@@ -676,12 +684,40 @@ class WarehouseService {
 
       const url = `${origin}/v2/statistic/marketplaces/performance?${params.toString()}`;
       const res = await this.fetchAuthenticatedData(url);
-      const rows = Array.isArray(res?.data) ? res.data
+      const list = Array.isArray(res?.data) ? res.data
         : Array.isArray(res) ? res
         : Array.isArray(res?.data?.list) ? res.data.list
-        : Array.isArray(res?.list) ? res.list
         : [];
-      return { source: 'WAREHOUSE_API', rows, raw: res, message: null };
+      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+      const rows = list.map((r) => {
+        const mp = r.marketplace || {};
+        const owner = Array.isArray(r.user_marketplaces) ? r.user_marketplaces[0] : null;
+        return {
+          id: String(r.mp_id ?? mp.id ?? ''),
+          name: mp.mp_name || mp.mp_username || String(r.mp_id ?? ''),
+          username: mp.mp_username || '',
+          type: mp.mp_type || 'other', // 'shopee' | 'tiktok' | ...
+          owner: owner?.user?.name || '',
+          ownerAlias: owner?.user_team?.alias || '',
+          orderCount: num(r.order_count),
+          itemCount: num(r.item_count),
+          orderAmount: num(r.order_amount),   // omzet
+          itemAmount: num(r.item_amount),
+          spentAmount: num(r.spent_amount),   // HPP + biaya
+          adsTotal: num(r.ads_total),
+          estimatedProfit: num(r.estimated_profit),
+          profitLoss: num(r.profit_loss),     // laba/rugi bersih
+          returnAmount: num(r.creturn_amount),
+          wdAmount: num(r.wd_amount),
+        };
+      });
+      return {
+        source: 'WAREHOUSE_API',
+        rows,
+        pageInfo: res?.page_info || null,
+        team: res?.filter_data?.team || null,
+        message: null,
+      };
     } catch (err) {
       console.warn('[Warehouse Service] Failed to fetch marketplace performance:', err.message);
       return { source: 'EMPTY', rows: [], raw: null, message: err.message };
