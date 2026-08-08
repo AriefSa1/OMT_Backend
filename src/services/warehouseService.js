@@ -724,6 +724,25 @@ class WarehouseService {
     }
   }
 
+  /**
+   * Daftar marketplace (untuk dropdown pemetaan saat mendaftarkan toko). Diturunkan
+   * dari endpoint performance rentang lebar (90 hari) lalu di-dedupe. Ringan & cukup.
+   */
+  async listMarketplaces() {
+    const now = Date.now();
+    const res = await this.fetchMarketplacePerformance({
+      timeMin: now - 90 * 86400000,
+      timeMax: now,
+      limit: 100,
+    });
+    const seen = new Map();
+    for (const r of res.rows || []) {
+      if (!r.id || seen.has(r.id)) continue;
+      seen.set(r.id, { id: r.id, name: r.name, type: r.type, username: r.username });
+    }
+    return { source: res.source, marketplaces: [...seen.values()], message: res.message || null };
+  }
+
   determineProductType(prod, team = null) {
     if (Boolean(prod?.priority || prod?.isPriority || prod?.is_priority)) {
       return 'priority';

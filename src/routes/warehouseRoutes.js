@@ -7,6 +7,7 @@ const {
   getReconciliation,
   getTeamOverview,
   getMarketplacePerformance,
+  getMarketplaces,
   triggerWarehouseSync,
 } = require('../controllers/warehouseController');
 
@@ -20,6 +21,7 @@ router.get('/inventory/:sku', getProductDetail);
 router.get('/inventory/:sku/history', getProductHistory);
 router.get('/reconciliation', getReconciliation);
 router.get('/marketplace-performance', getMarketplacePerformance);
+router.get('/marketplaces', getMarketplaces);
 router.post('/sync', triggerWarehouseSync);
 
 module.exports = router;

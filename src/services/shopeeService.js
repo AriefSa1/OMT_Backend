@@ -358,7 +358,7 @@ class ShopeeService {
 
   async updateSession(storeId, updates = {}) {
     if (!storeId) throw new Error('storeId wajib disertakan.');
-    const allowed = ['storeName', 'cookieString', 'userAgent', 'csrfToken', 'isActive', 'userId'];
+    const allowed = ['storeName', 'cookieString', 'userAgent', 'csrfToken', 'isActive', 'userId', 'marketplaceId', 'marketplaceName', 'marketplaceType'];
     const data = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) data[key] = updates[key];
@@ -394,7 +394,14 @@ class ShopeeService {
     return { success: true, storeId: id };
   }
 
-  async saveSession({ storeName, storeId, cookieString, userAgent, csrfToken, isActive = true, userId = null }) {
+  async saveSession({ storeName, storeId, cookieString, userAgent, csrfToken, isActive = true, userId = null, marketplaceId = undefined, marketplaceName = undefined, marketplaceType = undefined }) {
+    // Sertakan field marketplace hanya bila dikirim, agar re-connect tanpa memilih mp
+    // tidak menghapus pemetaan yang sudah ada.
+    const mpFields = {};
+    if (marketplaceId !== undefined) mpFields.marketplaceId = marketplaceId === null || marketplaceId === '' ? null : Number(marketplaceId);
+    if (marketplaceName !== undefined) mpFields.marketplaceName = marketplaceName || null;
+    if (marketplaceType !== undefined) mpFields.marketplaceType = marketplaceType || null;
+
     const session = await prisma.storeSession.upsert({
       where: { storeId },
       update: {
@@ -405,6 +412,7 @@ class ShopeeService {
         isActive,
         lastSyncedAt: new Date(),
         ...(userId ? { userId } : {}),
+        ...mpFields,
       },
       create: {
         storeName,
@@ -414,6 +422,7 @@ class ShopeeService {
         csrfToken,
         isActive,
         ...(userId ? { userId } : {}),
+        ...mpFields,
       },
       include: {
         user: {

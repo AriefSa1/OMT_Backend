@@ -123,6 +123,14 @@ async function getMarketplacePerformance(req, res) {
   return res.json({ success: result.source === 'WAREHOUSE_API', ...result });
 }
 
+/**
+ * GET /api/warehouse/marketplaces — daftar marketplace untuk pemetaan toko.
+ */
+async function getMarketplaces(req, res) {
+  const result = await warehouseService.listMarketplaces();
+  return res.json({ success: result.source === 'WAREHOUSE_API', ...result });
+}
+
 module.exports = wrapHandlers({
   getInventory,
   getProductDetail,
@@ -130,5 +138,6 @@ module.exports = wrapHandlers({
   getReconciliation,
   getTeamOverview,
   getMarketplacePerformance,
+  getMarketplaces,
   triggerWarehouseSync,
 });

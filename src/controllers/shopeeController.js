@@ -49,6 +49,9 @@ function toPublicSession(session) {
     updatedAt: session.updatedAt,
     userId: session.userId || null,
     owner: session.user || session.owner || null,
+    marketplaceId: session.marketplaceId ?? null,
+    marketplaceName: session.marketplaceName || null,
+    marketplaceType: session.marketplaceType || null,
   };
 }
 
@@ -92,7 +95,7 @@ async function resolveAuthorizedStoreId(req, requestedStoreId = null) {
 }
 
 async function parseCookie(req, res) {
-  const { rawCookie, storeName } = req.body;
+  const { rawCookie, storeName, marketplaceId, marketplaceName, marketplaceType } = req.body;
   const analysis = parseShopeeCookie(rawCookie || '');
   if (!rawCookie) return res.status(400).json({ success: false, error: 'Cookie Shopee wajib diisi.' });
   if (!analysis.hasCsrfToken) {
@@ -119,6 +122,10 @@ async function parseCookie(req, res) {
     csrfToken: analysis.csrfToken || null,
     isActive: true,
     userId: req.user?.id || null,
+    // Pemetaan marketplace Gudang (opsional) — dikirim dari form daftar toko.
+    ...(marketplaceId !== undefined ? { marketplaceId } : {}),
+    ...(marketplaceName !== undefined ? { marketplaceName } : {}),
+    ...(marketplaceType !== undefined ? { marketplaceType } : {}),
   });
 
   await configService.setMany({ storeName: session.storeName, cookieString: rawCookie });
