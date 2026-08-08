@@ -2,6 +2,7 @@ const snapshotService = require('../services/snapshotService');
 const warehouseService = require('../services/warehouseService');
 const syncService = require('../services/syncService');
 const { wrapHandlers } = require('../utils/asyncHandler');
+const { resolveRange } = require('../utils/dateRange');
 
 async function getInventory(req, res) {
   try {
@@ -102,11 +103,32 @@ async function triggerWarehouseSync(req, res) {
   return res.status(result.success ? 200 : 502).json(result);
 }
 
+/**
+ * GET /api/warehouse/marketplace-performance — performa jual per-marketplace dari
+ * sisi Gudang. Rentang tanggal (start_date/end_date ISO) dikonversi ke MILIDETIK.
+ */
+async function getMarketplacePerformance(req, res) {
+  const { start_date, end_date, startDate, endDate, page, limit, from } = req.query;
+  const sd = start_date || startDate;
+  const ed = end_date || endDate;
+  const { start, end } = resolveRange({ startDate: sd, endDate: ed, unit: 'ms', days: 30 });
+
+  const result = await warehouseService.fetchMarketplacePerformance({
+    timeMin: start,
+    timeMax: end,
+    from: from || 'selling',
+    page: page ? Number(page) : 1,
+    limit: limit ? Number(limit) : 20,
+  });
+  return res.json({ success: result.source === 'WAREHOUSE_API', ...result });
+}
+
 module.exports = wrapHandlers({
   getInventory,
   getProductDetail,
   getProductHistory,
   getReconciliation,
   getTeamOverview,
+  getMarketplacePerformance,
   triggerWarehouseSync,
 });

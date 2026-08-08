@@ -647,6 +647,47 @@ class WarehouseService {
     }
   }
 
+  /**
+   * Performa penjualan per-marketplace dari sistem Gudang (PDC).
+   * Endpoint: /v2/statistic/marketplaces/performance (butuh token — ditangani
+   * fetchAuthenticatedData). Waktu dalam MILIDETIK (beda dari Shopee yang detik).
+   *
+   * CATATAN: struktur `rows` belum dikonfirmasi dari response asli — pengembalian
+   * menyertakan `raw` agar bentuk sebenarnya bisa dipetakan ke UI setelah dilihat.
+   * domain_id/team_id bisa dioverride lewat env (default: teamId sesi login).
+   */
+  async fetchMarketplacePerformance({ timeMin, timeMax, from = 'selling', page = 1, limit = 20, orderDesc = true } = {}) {
+    try {
+      const origin = new URL(this.loginUrl || 'https://pdcgudang.et.r.appspot.com').origin;
+      const teamId = process.env.WAREHOUSE_TEAM_ID || this.teamId || '';
+      const domainId = process.env.WAREHOUSE_DOMAIN_ID || teamId;
+      const params = new URLSearchParams({
+        from,
+        domain_id: String(domainId),
+        team_id: String(teamId),
+        user_id: '0',
+        time_type: 'event',
+        page: String(Math.max(1, Number(page) || 1)),
+        limit: String(Math.min(100, Math.max(1, Number(limit) || 20))),
+        order_desc: String(Boolean(orderDesc)),
+      });
+      if (Number(timeMin) > 0) params.set('time_min', String(Math.floor(Number(timeMin))));
+      if (Number(timeMax) > 0) params.set('time_max', String(Math.floor(Number(timeMax))));
+
+      const url = `${origin}/v2/statistic/marketplaces/performance?${params.toString()}`;
+      const res = await this.fetchAuthenticatedData(url);
+      const rows = Array.isArray(res?.data) ? res.data
+        : Array.isArray(res) ? res
+        : Array.isArray(res?.data?.list) ? res.data.list
+        : Array.isArray(res?.list) ? res.list
+        : [];
+      return { source: 'WAREHOUSE_API', rows, raw: res, message: null };
+    } catch (err) {
+      console.warn('[Warehouse Service] Failed to fetch marketplace performance:', err.message);
+      return { source: 'EMPTY', rows: [], raw: null, message: err.message };
+    }
+  }
+
   determineProductType(prod, team = null) {
     if (Boolean(prod?.priority || prod?.isPriority || prod?.is_priority)) {
       return 'priority';

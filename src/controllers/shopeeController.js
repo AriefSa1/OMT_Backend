@@ -685,6 +685,53 @@ async function getProductTrends(req, res) {
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
 }
 
+/**
+ * GET /api/shopee/promotions/discounts — performa promo diskon.
+ */
+async function getDiscountPerformance(req, res) {
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+  if (resolved.error) return res.status(resolved.status).json({ success: false, error: resolved.error });
+  if (!resolved.storeId) {
+    return res.json({ success: true, source: 'EMPTY', promotions: [], message: 'Tidak ada toko terhubung untuk akun Anda.' });
+  }
+
+  const { startTime, endTime } = rangeFromQuery(req.query);
+  const period = req.query.period
+    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
+    || 'day';
+
+  const result = await shopeeService.fetchDiscountPerformance({
+    startTime,
+    endTime,
+    period,
+    promotionType: req.query.promotion_type ? Number(req.query.promotion_type) : 1,
+    orderType: req.query.order_type || 'confirmed',
+    storeId: resolved.storeId,
+  });
+  return res.json({ success: result.source === 'SHOPEE_API', ...result });
+}
+
+/**
+ * GET /api/shopee/promotions/vouchers — daftar voucher (berpaginasi).
+ */
+async function getVoucherList(req, res) {
+  const reqStoreId = req.query.store_id || req.query.storeId || null;
+  const resolved = await resolveAuthorizedStoreId(req, reqStoreId);
+  if (resolved.error) return res.status(resolved.status).json({ success: false, error: resolved.error });
+  if (!resolved.storeId) {
+    return res.json({ success: true, source: 'EMPTY', vouchers: [], total: 0, message: 'Tidak ada toko terhubung untuk akun Anda.' });
+  }
+
+  const result = await shopeeService.fetchVoucherList({
+    offset: req.query.offset ? Number(req.query.offset) : 0,
+    limit: req.query.limit ? Number(req.query.limit) : 10,
+    promotionType: req.query.promotion_type ? Number(req.query.promotion_type) : 2,
+    storeId: resolved.storeId,
+  });
+  return res.json({ success: result.source === 'SHOPEE_API', ...result });
+}
+
 module.exports = {
   ...wrapHandlers({
     parseCookie,
@@ -699,6 +746,8 @@ module.exports = {
     getProductPerformance,
     getProductOverview,
     getProductTrends,
+    getDiscountPerformance,
+    getVoucherList,
     getTrafficSources,
     triggerSync,
     validateCookie,

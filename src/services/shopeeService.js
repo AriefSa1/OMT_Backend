@@ -33,6 +33,9 @@ const SHOPEE_PRODUCT_INFO_ENDPOINT = 'https://seller.shopee.co.id/api/v3/product
 const SHOPEE_PRODUCT_OVERVIEW_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v2/product/overview/';
 // Versi time-series dari overview: tiap metrik → array {timestamp, value}.
 const SHOPEE_PRODUCT_OVERVIEW_TRENDS_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/v2/product/overview/metric-trends/';
+// Performa promo diskon (list per promo) + daftar voucher (berpaginasi).
+const SHOPEE_DISCOUNT_PERFORMANCE_ENDPOINT = 'https://seller.shopee.co.id/api/mydata/marketing/new-discount/performance-list/';
+const SHOPEE_VOUCHER_LIST_ENDPOINT = 'https://seller.shopee.co.id/api/marketing/v3/voucher/list/';
 const ADS_AMOUNT_DIVISOR = 100000;
 const SHOPEE_ORDER_BY = {
   'confirmed_sales.desc': 'confirmed_sales.desc',
@@ -1134,6 +1137,146 @@ class ShopeeService {
         message: status === 401 || status === 403
           ? 'Seller Center menolak sesi ini. Perbarui cookie di Pengaturan.'
           : status ? `Metric trends mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
+  }
+
+  /**
+   * Performa promo diskon (new-discount/performance-list). result = array promo.
+   * ID di-string-kan untuk aman dari presisi angka besar.
+   */
+  async fetchDiscountPerformance({ startTime, endTime, period = 'day', promotionType = 1, orderType = 'confirmed', cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', promotions: [], message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const end = Number(endTime) || now;
+    const start = Number(startTime) || (end - 86400);
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      start_time: String(start),
+      end_time: String(end),
+      period,
+      promotion_type: String(promotionType),
+      order_type: orderType,
+    });
+
+    try {
+      const response = await shopeeRequest({
+        method: 'get',
+        url: `${SHOPEE_DISCOUNT_PERFORMANCE_ENDPOINT}?${params}`,
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data ?? {};
+      const list = Array.isArray(payload.result) ? payload.result : [];
+      if (payload.code !== 0 && !list.length) {
+        return { source: 'EMPTY', promotions: [], message: payload.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak performa diskon.' };
+      }
+      const promotions = list.map((p) => ({
+        id: String(p.promotion_id ?? ''),
+        name: p.promotion_name || '(tanpa nama)',
+        promotionType: p.promotion_type ?? null,
+        status: p.status ?? null,
+        createTime: p.create_time ?? null,
+        startTime: p.start_time ?? null,
+        endTime: p.end_time ?? null,
+        units: asFiniteNumber(p.units),
+        orders: asFiniteNumber(p.orders),
+        buyers: asFiniteNumber(p.buyers),
+        sales: asFiniteNumber(p.sales),
+        salesPerBuyer: asFiniteNumber(p.sales_per_buyer),
+      }));
+      return { source: 'SHOPEE_API', promotions, message: null };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        promotions: [],
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini. Perbarui cookie di Pengaturan.'
+          : status ? `Performa diskon mengembalikan HTTP ${status}.` : err.message,
+      };
+    }
+  }
+
+  /**
+   * Daftar voucher (marketing/v3/voucher/list). Envelope {code,message,data:{...}}
+   * berbeda dari endpoint lain. Nilai uang datang sebagai string → dikonversi angka.
+   */
+  async fetchVoucherList({ offset = 0, limit = 10, promotionType = 2, cookie: customCookie = '', storeId = null } = {}) {
+    const session = await this.getActiveSession(storeId);
+    const cookie = await this._resolveCookie({ customCookie, storeId, session });
+    const csrfToken = extractCsrfFromCookie(cookie);
+    if (!cookie || !csrfToken) {
+      return { source: 'EMPTY', vouchers: [], total: 0, message: 'Simpan cookie Shopee yang valid di Pengaturan.' };
+    }
+
+    const params = new URLSearchParams({
+      SPC_CDS: csrfToken,
+      SPC_CDS_VER: '2',
+      offset: String(Math.max(0, Number(offset) || 0)),
+      limit: String(Math.min(100, Math.max(1, Number(limit) || 10))),
+      promotion_type: String(promotionType),
+    });
+
+    try {
+      const response = await shopeeRequest({
+        method: 'get',
+        url: `${SHOPEE_VOUCHER_LIST_ENDPOINT}?${params}`,
+        headers: getShopeeHeaders(cookie, csrfToken, session?.userAgent),
+        timeout: 15000,
+      });
+      const payload = response.data ?? {};
+      const data = payload.data || {};
+      const list = Array.isArray(data.voucher_list) ? data.voucher_list : [];
+      if (payload.code !== 0 && !list.length) {
+        return { source: 'EMPTY', vouchers: [], total: 0, message: payload.message ? `Seller Center: ${payload.message}` : 'Seller Center menolak daftar voucher.' };
+      }
+      const vouchers = list.map((v) => {
+        const rule = v.rule || {};
+        return {
+          id: String(v.voucher_id ?? ''),
+          code: v.voucher_code || '',
+          name: v.name || '(tanpa nama)',
+          value: asFiniteNumber(v.value),
+          minSpend: asFiniteNumber(v.min_price),
+          maxValue: asFiniteNumber(v.max_value),
+          discountPercent: asFiniteNumber(v.discount) || asFiniteNumber(rule.discount_percentage_with_decimal),
+          startTime: v.start_time ?? null,
+          endTime: v.end_time ?? null,
+          status: v.status ?? null,
+          feStatus: v.fe_status ?? null,
+          usageLimit: asFiniteNumber(v.usage_limit) || asFiniteNumber(v.usage_quantity),
+          used: asFiniteNumber(v.current_usage),
+          distributed: asFiniteNumber(v.distributed_count),
+          perUserLimit: asFiniteNumber(rule.usage_limit_per_user),
+          sellerAbsorbed: Boolean(rule.is_seller_absorbed),
+          minBuyerOrders: asFiniteNumber(rule.choose_users?.shop_order_count),
+        };
+      });
+      return {
+        source: 'SHOPEE_API',
+        vouchers,
+        total: asFiniteNumber(data.total_count),
+        offset: Number(offset) || 0,
+        limit: Number(limit) || 10,
+        message: null,
+      };
+    } catch (err) {
+      const status = err.response?.status;
+      return {
+        source: 'EMPTY',
+        vouchers: [],
+        total: 0,
+        message: status === 401 || status === 403
+          ? 'Seller Center menolak sesi ini. Perbarui cookie di Pengaturan.'
+          : status ? `Daftar voucher mengembalikan HTTP ${status}.` : err.message,
       };
     }
   }
