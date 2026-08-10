@@ -27,6 +27,21 @@ function rangeFromQuery(query = {}) {
   };
 }
 
+/**
+ * Period untuk endpoint product/overview & metric-trends. Nilai valid (dari dashboard
+ * Shopee): 'real_time' (hari ini), 'yesterday', 'past7days', 'past30days', 'month'.
+ * Endpoint ini MENOLAK 'day' dan period-locked (mengabaikan start_time/end_time), jadi
+ * frontend WAJIB mengirim `period` eksplisit untuk preset. Fallback (rentang custom, tanpa
+ * period) diturunkan dari span — hindari 'day'.
+ */
+function overviewPeriodFromQuery(query = {}) {
+  if (query.period) return query.period; // frontend kirim nilai Shopee eksplisit
+  const sd = query.start_date || query.startDate;
+  const ed = query.end_date || query.endDate;
+  const p = derivePeriod(sd, ed); // 'day' | 'past7days' | 'past30days' | null
+  return p === 'past30days' ? 'past30days' : 'past7days'; // 'day'/null/≤7 → past7days
+}
+
 function toPublicAnalysis(analysis) {
   return {
     isValid: analysis.isValid,
@@ -688,9 +703,7 @@ async function getProductOverview(req, res) {
   }
 
   const { startTime, endTime } = rangeFromQuery(req.query);
-  const period = req.query.period
-    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
-    || 'day';
+  const period = overviewPeriodFromQuery(req.query);
 
   const result = await shopeeService.fetchProductOverview({ startTime, endTime, period, storeId: resolved.storeId });
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
@@ -708,9 +721,7 @@ async function getProductTrends(req, res) {
   }
 
   const { startTime, endTime } = rangeFromQuery(req.query);
-  const period = req.query.period
-    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
-    || 'day';
+  const period = overviewPeriodFromQuery(req.query);
 
   const result = await shopeeService.fetchProductMetricTrends({ startTime, endTime, period, storeId: resolved.storeId });
   return res.json({ success: result.source === 'SHOPEE_API', ...result });

@@ -981,10 +981,16 @@ class SnapshotService {
     };
   }
 
-  async getDashboardOverview(storeId = null, period = 'real_time') {
+  async getDashboardOverview(storeId = null, period = 'real_time', range = null) {
     const shopeeService = require('./shopeeService');
     const syncService = require('./syncService');
     const session = await shopeeService.getActiveSession(storeId);
+
+    // Rentang tanggal eksplisit (dari /orders). Bila ada, KPI/salesTrend/orderQuality
+    // difilter ke [startDate,endDate] alih-alih memakai bucket period. Jalur period lama
+    // (Beranda) tidak berubah saat range == null. Tanggal ISO 'YYYY-MM-DD' → perbandingan
+    // string lexicografis = kronologis.
+    const useRange = Boolean(range && range.startDate && range.endDate);
 
     // Paralelkan konteks snapshot (5 query DB) dengan live API fetch —
     // getDashboardOverview sekarang butuh ~600ms lebih cepat karena
@@ -1019,9 +1025,12 @@ class SnapshotService {
       this.getAdsSnapshot({ storeId: session?.storeId || storeId, preloadedContext: context }),
       this.getWarehouseSnapshot({ page: 1, limit: 8, preloadedContext: context }),
       prisma.shopeeOrderSummary.findMany({
-        where: session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {}),
+        where: {
+          ...(session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {})),
+          ...(useRange ? { date: { gte: range.startDate, lte: range.endDate } } : {}),
+        },
         orderBy: { date: 'desc' },
-        take: 64,
+        take: useRange ? 400 : 64,
       }),
     ]);
 
@@ -1029,7 +1038,8 @@ class SnapshotService {
 
     // Aggregation logic for periods
     const reversedAds = [...ads.history].reverse(); // Now newest first
-    const orderSlices = getPeriodSlices(period, orders);
+    // Rentang custom: seluruh baris terfilter jadi "current"; tak ada pembanding.
+    const orderSlices = useRange ? { current: orders, previous: [] } : getPeriodSlices(period, orders);
     const adsSlices = getPeriodSlices(period, reversedAds);
     const { current: currentOrders, previous: previousOrders } = orderSlices;
     const { current: currentAds, previous: previousAds } = adsSlices;
@@ -1066,8 +1076,8 @@ class SnapshotService {
     }
     const adsYesterday = aggregateAds(previousAds);
 
-    // Order Quality still uses the last 30 days available
-    const cancellationRows = orders.slice(0, 30).filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
+    // Order Quality: rentang custom pakai semua baris terfilter; default 30 hari terakhir.
+    const cancellationRows = (useRange ? orders : orders.slice(0, 30)).filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
     const sumField = (rows, field) => rows.reduce((total, row) => total + number(row[field]), 0);
     const orderQuality = {
       days: cancellationRows.length,
@@ -1117,7 +1127,7 @@ class SnapshotService {
     };
 
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
-    const salesTrend = orders.slice(0, 30).reverse().map((row) => {
+    const salesTrend = (useRange ? [...orders] : orders.slice(0, 30)).reverse().map((row) => {
       const adRow = adByDate.get(row.date);
       return {
         day: row.date,
