@@ -806,19 +806,31 @@ class SnapshotService {
       .map((id, index) => `WHEN ${Number(id)} THEN ${index}`)
       .join(' ')} ELSE ${ACTIVE_WAREHOUSE_ID_LIST.length} END`;
 
+    // Daftar rekonsiliasi untuk halaman detail: bawa field LENGKAP (stok Shopee/gudang,
+    // selisih, nama, gudang) — bukan hanya sku+status. Dibangun dari baris StockReconciliation
+    // penuh (pageReconciliationRows = sr.*), satu baris representatif per SKU (paling baru dicek).
+    // Cakupan mengikuti halaman (limit dari pemanggil); jumlah selisih total tetap akurat dari
+    // reconciliationStats (query terpisah atas semua SKU).
+    const itemNameBySku = new Map(pagedItems.map((it) => [it.sku, it.name]));
+    const seenReconSku = new Set();
     const reconciliations = includeReconciliationList === true
-      ? await queryRaw(
-        prisma,
-        `SELECT sr."sku", MIN(sr."status") AS "status", MAX(sr."checkedAt") AS "checkedAt",
-                MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
-         FROM (${latestReconciliationSql('')}) sr
-         INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
-           ON item."sku" = sr."sku"
-         GROUP BY sr."sku"`,
-        ...ACTIVE_WAREHOUSE_ID_LIST,
-        ...ACTIVE_WAREHOUSE_ID_LIST,
-        ...viewParams
-      )
+      ? pageReconciliationRows.reduce((list, r) => {
+        if (seenReconSku.has(r.sku)) return list;
+        seenReconSku.add(r.sku);
+        list.push({
+          sku: r.sku,
+          name: itemNameBySku.get(r.sku) || null,
+          warehouseName: r.warehouseName
+            || ACTIVE_WAREHOUSES.find((w) => w.id === Number(r.warehouseId))?.name
+            || null,
+          shopeeStock: number(r.shopeeStock),
+          warehouseStock: number(r.warehouseStock),
+          variance: number(r.variance),
+          status: r.status,
+          checkedAt: r.checkedAt,
+        });
+        return list;
+      }, [])
       : [];
 
     const [[skuOverlap]] = await Promise.all([
