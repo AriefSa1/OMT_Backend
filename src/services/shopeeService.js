@@ -1084,6 +1084,10 @@ class ShopeeService {
         timeout: 12000,
       });
       const payload = response.data ?? {};
+      // Envelope error (mis. {code:-1,msg}) tak boleh dianggap sukses berisi metrik palsu.
+      if (payload && typeof payload === 'object' && 'code' in payload && payload.code !== 0) {
+        return { source: 'EMPTY', metrics: null, message: payload.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak product overview.' };
+      }
       const result = (payload && typeof payload === 'object' && 'result' in payload) ? payload.result : payload;
       if (!result || typeof result !== 'object' || Array.isArray(result)) {
         return { source: 'EMPTY', metrics: null, message: payload?.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak product overview.' };
@@ -1133,6 +1137,9 @@ class ShopeeService {
         timeout: 15000,
       });
       const payload = response.data ?? {};
+      if (payload && typeof payload === 'object' && 'code' in payload && payload.code !== 0) {
+        return { source: 'EMPTY', series: {}, message: payload.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak metric trends.' };
+      }
       const result = (payload && typeof payload === 'object' && 'result' in payload) ? payload.result : payload;
       if (!result || typeof result !== 'object' || Array.isArray(result)) {
         return { source: 'EMPTY', series: {}, message: payload?.msg ? `Seller Center: ${payload.msg}` : 'Seller Center menolak metric trends.' };
