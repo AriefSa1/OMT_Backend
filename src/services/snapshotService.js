@@ -564,8 +564,8 @@ class SnapshotService {
     };
   }
 
-  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false, preloadedContext = null } = {}) {
-    const { latestWarehouseLog, warehouseConfigured } = preloadedContext || await this.getContext();
+  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false, preloadedContext = null, store_id = null } = {}) {
+    const { latestWarehouseLog, warehouseConfigured, session } = preloadedContext || await this.getContext(store_id);
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
 

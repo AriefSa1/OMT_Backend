@@ -8,6 +8,20 @@ async function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization || req.headers.Authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      // Dev-only bypass: request tanpa token dianggap admin default. DIKUNCI GANDA —
+      // hanya aktif bila BUKAN produksi DAN flag DEV_AUTH_BYPASS=1 diset eksplisit.
+      // Di produksi (Render, NODE_ENV=production) ini MUSTAHIL aktif meski flag terlanjur diset.
+      const devBypass = process.env.NODE_ENV !== 'production' && process.env.DEV_AUTH_BYPASS === '1';
+      if (devBypass) {
+        const defaultUser = await prisma.user.findFirst({
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, email: true, name: true, role: true, createdAt: true }
+        });
+        if (defaultUser) {
+          req.user = defaultUser;
+          return next();
+        }
+      }
       return res.status(401).json({
         success: false,
         error: 'Unauthorized: Missing or invalid authorization token format'
