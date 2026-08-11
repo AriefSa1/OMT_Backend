@@ -269,13 +269,17 @@ class SnapshotService {
       : await prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } });
     const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 10));
     const safePageNum = Math.max(1, Number(pageNum) || 1);
-    const endDate = dateKey();
+    const today = dateKey();
     const days = period === 'yesterday' ? 1 : period === 'past30days' ? 30 : period === 'past7days' ? 7 : 0;
+    // "yesterday" = HANYA kemarin. endDate WAJIB ikut digeser ke kemarin; kalau dibiarkan
+    // hari ini, window [kemarin, hari ini] menjumlahkan snapshot hari ini ke angka "Kemarin"
+    // (getProductPerformanceSnapshot mengagregasi semua baris dalam rentang tanggal).
+    const endDate = period === 'yesterday' ? shiftDateKey(today, -1) : today;
     const startDate = period === 'real_time'
-      ? endDate
+      ? today
       : period === 'yesterday'
-        ? shiftDateKey(endDate, -1)
-        : shiftDateKey(endDate, -(days - 1));
+        ? shiftDateKey(today, -1)
+        : shiftDateKey(today, -(days - 1));
 
     if (!session?.storeId) {
       return {
