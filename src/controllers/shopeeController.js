@@ -30,10 +30,11 @@ function rangeFromQuery(query = {}) {
 
 /**
  * Period untuk endpoint product/overview & metric-trends. Nilai valid (dari dashboard
- * Shopee): 'real_time' (hari ini), 'yesterday', 'past7days', 'past30days', 'month'.
+ * Shopee): 'real_time' (hari ini), 'yesterday', 'past7days', 'past30days'. TIDAK ada nilai
+ * "bulan kalender" — Shopee menolak 'month'/'this_month'/dll ("err:invalid param").
  * Endpoint ini MENOLAK 'day' dan period-locked (mengabaikan start_time/end_time), jadi
- * frontend WAJIB mengirim `period` eksplisit untuk preset. Fallback (rentang custom, tanpa
- * period) diturunkan dari span — hindari 'day'.
+ * frontend mengirim `period` eksplisit untuk preset yang cocok; "Bulan ini"/custom mengirim
+ * TANPA period → diturunkan dari span di bawah (past7days/past30days, hindari 'day').
  */
 function overviewPeriodFromQuery(query = {}) {
   if (query.period) return query.period; // frontend kirim nilai Shopee eksplisit
