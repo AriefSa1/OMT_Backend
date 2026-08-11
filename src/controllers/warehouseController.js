@@ -73,8 +73,8 @@ async function getProductHistory(req, res) {
 
 async function getReconciliation(req, res) {
   try {
-    const snapshot = await snapshotService.getWarehouseSnapshot({ page: 1, limit: 100, includeReconciliationList: true });
-    const reconciliationList = snapshot.reconciliation;
+    const snapshot = await snapshotService.getWarehouseSnapshot({ ...req.query, page: 1, limit: 100, includeReconciliationList: true });
+    const reconciliationList = snapshot.reconciliation || [];
     const discrepanciesCount = reconciliationList.filter((row) => row.status !== 'MATCHED').length;
     return res.json({
       success: true,
@@ -82,6 +82,9 @@ async function getReconciliation(req, res) {
       matchedCount: reconciliationList.length - discrepanciesCount,
       discrepanciesCount,
       reconciliationList,
+      reconciliation: reconciliationList,
+      totals: snapshot.totals,
+      reconciliationTrust: snapshot.reconciliationTrust,
       meta: snapshot.meta,
       dataSource: snapshot.meta.source,
       message: snapshot.meta.message,

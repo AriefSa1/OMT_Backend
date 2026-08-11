@@ -269,13 +269,17 @@ class SnapshotService {
       : await prisma.storeSession.findFirst({ where: { isActive: true }, orderBy: { updatedAt: 'desc' } });
     const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 10));
     const safePageNum = Math.max(1, Number(pageNum) || 1);
-    const endDate = dateKey();
+    const today = dateKey();
     const days = period === 'yesterday' ? 1 : period === 'past30days' ? 30 : period === 'past7days' ? 7 : 0;
+    // "yesterday" = HANYA kemarin. endDate WAJIB ikut digeser ke kemarin; kalau dibiarkan
+    // hari ini, window [kemarin, hari ini] menjumlahkan snapshot hari ini ke angka "Kemarin"
+    // (getProductPerformanceSnapshot mengagregasi semua baris dalam rentang tanggal).
+    const endDate = period === 'yesterday' ? shiftDateKey(today, -1) : today;
     const startDate = period === 'real_time'
-      ? endDate
+      ? today
       : period === 'yesterday'
-        ? shiftDateKey(endDate, -1)
-        : shiftDateKey(endDate, -(days - 1));
+        ? shiftDateKey(today, -1)
+        : shiftDateKey(today, -(days - 1));
 
     if (!session?.storeId) {
       return {
@@ -564,8 +568,8 @@ class SnapshotService {
     };
   }
 
-  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false, preloadedContext = null } = {}) {
-    const { latestWarehouseLog, warehouseConfigured } = preloadedContext || await this.getContext();
+  async getWarehouseSnapshot({ page = 1, limit = 24, search = '', type = 'all', warehouseId = 'all', teamId = 'all', sort = 'lastUpdated', sortBy = '', direction = 'desc', includeReconciliationList = false, preloadedContext = null, store_id = null } = {}) {
+    const { latestWarehouseLog, warehouseConfigured, session } = preloadedContext || await this.getContext(store_id);
     const safePage = Math.max(1, Number(page) || 1);
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 24));
 
@@ -806,19 +810,31 @@ class SnapshotService {
       .map((id, index) => `WHEN ${Number(id)} THEN ${index}`)
       .join(' ')} ELSE ${ACTIVE_WAREHOUSE_ID_LIST.length} END`;
 
+    // Daftar rekonsiliasi untuk halaman detail: bawa field LENGKAP (stok Shopee/gudang,
+    // selisih, nama, gudang) — bukan hanya sku+status. Dibangun dari baris StockReconciliation
+    // penuh (pageReconciliationRows = sr.*), satu baris representatif per SKU (paling baru dicek).
+    // Cakupan mengikuti halaman (limit dari pemanggil); jumlah selisih total tetap akurat dari
+    // reconciliationStats (query terpisah atas semua SKU).
+    const itemNameBySku = new Map(pagedItems.map((it) => [it.sku, it.name]));
+    const seenReconSku = new Set();
     const reconciliations = includeReconciliationList === true
-      ? await queryRaw(
-        prisma,
-        `SELECT sr."sku", MIN(sr."status") AS "status", MAX(sr."checkedAt") AS "checkedAt",
-                MIN(${warehousePrecedenceSql}) AS "warehousePrecedence"
-         FROM (${latestReconciliationSql('')}) sr
-         INNER JOIN (SELECT DISTINCT "sku" FROM "WarehouseItem" ${viewWhere}) item
-           ON item."sku" = sr."sku"
-         GROUP BY sr."sku"`,
-        ...ACTIVE_WAREHOUSE_ID_LIST,
-        ...ACTIVE_WAREHOUSE_ID_LIST,
-        ...viewParams
-      )
+      ? pageReconciliationRows.reduce((list, r) => {
+        if (seenReconSku.has(r.sku)) return list;
+        seenReconSku.add(r.sku);
+        list.push({
+          sku: r.sku,
+          name: itemNameBySku.get(r.sku) || null,
+          warehouseName: r.warehouseName
+            || ACTIVE_WAREHOUSES.find((w) => w.id === Number(r.warehouseId))?.name
+            || null,
+          shopeeStock: number(r.shopeeStock),
+          warehouseStock: number(r.warehouseStock),
+          variance: number(r.variance),
+          status: r.status,
+          checkedAt: r.checkedAt,
+        });
+        return list;
+      }, [])
       : [];
 
     const [[skuOverlap]] = await Promise.all([
@@ -981,10 +997,16 @@ class SnapshotService {
     };
   }
 
-  async getDashboardOverview(storeId = null, period = 'real_time') {
+  async getDashboardOverview(storeId = null, period = 'real_time', range = null) {
     const shopeeService = require('./shopeeService');
     const syncService = require('./syncService');
     const session = await shopeeService.getActiveSession(storeId);
+
+    // Rentang tanggal eksplisit (dari /orders). Bila ada, KPI/salesTrend/orderQuality
+    // difilter ke [startDate,endDate] alih-alih memakai bucket period. Jalur period lama
+    // (Beranda) tidak berubah saat range == null. Tanggal ISO 'YYYY-MM-DD' → perbandingan
+    // string lexicografis = kronologis.
+    const useRange = Boolean(range && range.startDate && range.endDate);
 
     // Paralelkan konteks snapshot (5 query DB) dengan live API fetch —
     // getDashboardOverview sekarang butuh ~600ms lebih cepat karena
@@ -1019,9 +1041,12 @@ class SnapshotService {
       this.getAdsSnapshot({ storeId: session?.storeId || storeId, preloadedContext: context }),
       this.getWarehouseSnapshot({ page: 1, limit: 8, preloadedContext: context }),
       prisma.shopeeOrderSummary.findMany({
-        where: session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {}),
+        where: {
+          ...(session?.storeId ? { storeId: session.storeId } : (storeId ? { storeId } : {})),
+          ...(useRange ? { date: { gte: range.startDate, lte: range.endDate } } : {}),
+        },
         orderBy: { date: 'desc' },
-        take: 64,
+        take: useRange ? 400 : 64,
       }),
     ]);
 
@@ -1029,7 +1054,8 @@ class SnapshotService {
 
     // Aggregation logic for periods
     const reversedAds = [...ads.history].reverse(); // Now newest first
-    const orderSlices = getPeriodSlices(period, orders);
+    // Rentang custom: seluruh baris terfilter jadi "current"; tak ada pembanding.
+    const orderSlices = useRange ? { current: orders, previous: [] } : getPeriodSlices(period, orders);
     const adsSlices = getPeriodSlices(period, reversedAds);
     const { current: currentOrders, previous: previousOrders } = orderSlices;
     const { current: currentAds, previous: previousAds } = adsSlices;
@@ -1066,8 +1092,8 @@ class SnapshotService {
     }
     const adsYesterday = aggregateAds(previousAds);
 
-    // Order Quality still uses the last 30 days available
-    const cancellationRows = orders.slice(0, 30).filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
+    // Order Quality: rentang custom pakai semua baris terfilter; default 30 hari terakhir.
+    const cancellationRows = (useRange ? orders : orders.slice(0, 30)).filter((row) => row.cancelledOrders !== null && row.cancelledOrders !== undefined);
     const sumField = (rows, field) => rows.reduce((total, row) => total + number(row[field]), 0);
     const orderQuality = {
       days: cancellationRows.length,
@@ -1117,7 +1143,7 @@ class SnapshotService {
     };
 
     const adByDate = new Map(ads.history.map((row) => [row.date, row]));
-    const salesTrend = orders.slice(0, 30).reverse().map((row) => {
+    const salesTrend = (useRange ? [...orders] : orders.slice(0, 30)).reverse().map((row) => {
       const adRow = adByDate.get(row.date);
       return {
         day: row.date,

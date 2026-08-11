@@ -3,6 +3,7 @@ const shopeeService = require('../services/shopeeService');
 const configService = require('../services/configService');
 const snapshotService = require('../services/snapshotService');
 const syncService = require('../services/syncService');
+const jobQueueService = require('../services/jobQueueService');
 const prisma = require('../utils/prisma');
 const { wrapHandlers } = require('../utils/asyncHandler');
 const { getPeriodSlices, aggregateAdsRows, compareAdsMetric } = require('../utils/adsPeriod');
@@ -25,6 +26,22 @@ function rangeFromQuery(query = {}) {
     startTime: query.start_time ? Number(query.start_time) : undefined,
     endTime: query.end_time ? Number(query.end_time) : undefined,
   };
+}
+
+/**
+ * Period untuk endpoint product/overview & metric-trends. Nilai valid (dari dashboard
+ * Shopee): 'real_time' (hari ini), 'yesterday', 'past7days', 'past30days'. TIDAK ada nilai
+ * "bulan kalender" — Shopee menolak 'month'/'this_month'/dll ("err:invalid param").
+ * Endpoint ini MENOLAK 'day' dan period-locked (mengabaikan start_time/end_time), jadi
+ * frontend mengirim `period` eksplisit untuk preset yang cocok; "Bulan ini"/custom mengirim
+ * TANPA period → diturunkan dari span di bawah (past7days/past30days, hindari 'day').
+ */
+function overviewPeriodFromQuery(query = {}) {
+  if (query.period) return query.period; // frontend kirim nilai Shopee eksplisit
+  const sd = query.start_date || query.startDate;
+  const ed = query.end_date || query.endDate;
+  const p = derivePeriod(sd, ed); // 'day' | 'past7days' | 'past30days' | null
+  return p === 'past30days' ? 'past30days' : 'past7days'; // 'day'/null/≤7 → past7days
 }
 
 function toPublicAnalysis(analysis) {
@@ -129,14 +146,21 @@ async function parseCookie(req, res) {
   });
 
   await configService.setMany({ storeName: session.storeName, cookieString: rawCookie });
-  const sync = await syncService.syncShopee({ origin: 'CONNECT', storeId: session.storeId });
+
+  // Sinkronisasi awal dijalankan di LATAR BELAKANG lewat job queue — connect harus
+  // balas cepat. Sync penuh bisa >60 detik; bila ditunggu, request frontend timeout
+  // lalu di-abort (tampil "cancelled"/gagal) padahal backend sebenarnya sukses —
+  // makanya dulu tokonya "baru muncul setelah refresh".
+  jobQueueService
+    .enqueue({ type: 'SYNC_ALL', origin: 'CONNECT', storeId: session.storeId, payload: { userId: req.user?.id || null } })
+    .catch((err) => console.warn('[Connect] gagal mengantre sync awal:', err.message));
 
   return res.json({
-    success: sync.success,
+    success: true,
     analysis: toPublicAnalysis(analysis),
     session: toPublicSession(session),
-    sync,
-    message: sync.message,
+    sync: { queued: true },
+    message: 'Toko berhasil terhubung. Sinkronisasi awal sedang berjalan di latar belakang — data akan muncul dalam beberapa saat.',
   });
 }
 
@@ -688,9 +712,7 @@ async function getProductOverview(req, res) {
   }
 
   const { startTime, endTime } = rangeFromQuery(req.query);
-  const period = req.query.period
-    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
-    || 'day';
+  const period = overviewPeriodFromQuery(req.query);
 
   const result = await shopeeService.fetchProductOverview({ startTime, endTime, period, storeId: resolved.storeId });
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
@@ -708,9 +730,7 @@ async function getProductTrends(req, res) {
   }
 
   const { startTime, endTime } = rangeFromQuery(req.query);
-  const period = req.query.period
-    || derivePeriod(req.query.start_date || req.query.startDate, req.query.end_date || req.query.endDate)
-    || 'day';
+  const period = overviewPeriodFromQuery(req.query);
 
   const result = await shopeeService.fetchProductMetricTrends({ startTime, endTime, period, storeId: resolved.storeId });
   return res.json({ success: result.source === 'SHOPEE_API', ...result });
