@@ -649,14 +649,16 @@ class WarehouseService {
 
   /**
    * Performa penjualan per-marketplace dari sistem Gudang (PDC).
-   * Endpoint: /v2/statistic/marketplaces/performance (butuh token — ditangani
-   * fetchAuthenticatedData). Waktu dalam MILIDETIK (beda dari Shopee yang detik).
+   * Sumber utama: /v2/statistic/marketplaces/shop_performance dengan time_type=created_at —
+   * ini endpoint & basis yang dipakai dashboard Gudang, sehingga baris di sini MENJUMLAH
+   * PERSIS ke /v1/teams/performance/summary (Omzet/Iklan/L-R cocok 1:1 dengan dashboard).
+   * Endpoint lama (…/performance, time_type=event) memberi angka lebih kecil (mis. hanya
+   * marketplace ber-penjualan), jadi jangan dipakai untuk agregasi kartu ringkasan.
    *
-   * CATATAN: struktur `rows` belum dikonfirmasi dari response asli — pengembalian
-   * menyertakan `raw` agar bentuk sebenarnya bisa dipetakan ke UI setelah dilihat.
-   * domain_id/team_id bisa dioverride lewat env (default: teamId sesi login).
+   * Retur (creturn_amount) tak ada di shop_performance → digabung best-effort dari endpoint
+   * lama per marketplace. Waktu dalam MILIDETIK. domain_id/team_id override lewat env.
    */
-  async fetchMarketplacePerformance({ timeMin, timeMax, from = 'selling', page = 1, limit = 20, orderDesc = true } = {}) {
+  async fetchMarketplacePerformance({ timeMin, timeMax, from = 'selling', orderDesc = true } = {}) {
     try {
       await this.ensureConfigLoaded();
       // Login dulu supaya this.teamId/userId terisi SEBELUM membangun query — kalau
@@ -669,46 +671,69 @@ class WarehouseService {
       if (!teamId) {
         return { source: 'EMPTY', rows: [], raw: null, message: 'team_id Gudang tidak diketahui (login gudang belum terkonfigurasi). Set WAREHOUSE_TEAM_ID atau lengkapi kredensial gudang.' };
       }
-      const params = new URLSearchParams({
-        from,
-        domain_id: String(domainId),
-        team_id: String(teamId),
-        user_id: '0',
-        time_type: 'event',
-        page: String(Math.max(1, Number(page) || 1)),
-        limit: String(Math.min(100, Math.max(1, Number(limit) || 20))),
-        order_desc: String(Boolean(orderDesc)),
-      });
-      if (Number(timeMin) > 0) params.set('time_min', String(Math.floor(Number(timeMin))));
-      if (Number(timeMax) > 0) params.set('time_max', String(Math.floor(Number(timeMax))));
 
-      const url = `${origin}/v2/statistic/marketplaces/performance?${params.toString()}`;
-      const res = await this.fetchAuthenticatedData(url);
+      // limit tinggi (bukan 20) supaya SEMUA marketplace ikut — kalau terpotong, penjumlahan
+      // kartu ringkasan tak akan cocok dengan total tim Gudang.
+      const buildParams = (timeType) => {
+        const p = new URLSearchParams({
+          from,
+          domain_id: String(domainId),
+          team_id: String(teamId),
+          user_id: '0',
+          time_type: timeType,
+          page: '1',
+          limit: '500',
+          order_desc: String(Boolean(orderDesc)),
+        });
+        if (Number(timeMin) > 0) p.set('time_min', String(Math.floor(Number(timeMin))));
+        if (Number(timeMax) > 0) p.set('time_max', String(Math.floor(Number(timeMax))));
+        return p;
+      };
+
+      const shopUrl = `${origin}/v2/statistic/marketplaces/shop_performance?${buildParams('created_at').toString()}`;
+      const res = await this.fetchAuthenticatedData(shopUrl);
       const list = Array.isArray(res?.data) ? res.data
         : Array.isArray(res) ? res
         : Array.isArray(res?.data?.list) ? res.data.list
         : [];
+
+      // Retur per-marketplace: best-effort dari endpoint lama (punya creturn_amount).
+      // Gagal/lambat → biarkan 0, jangan sampai merusak data utama.
+      const returnsByMp = new Map();
+      try {
+        const perfUrl = `${origin}/v2/statistic/marketplaces/performance?${buildParams('event').toString()}`;
+        const perfRes = await this.fetchAuthenticatedData(perfUrl);
+        const perfList = Array.isArray(perfRes?.data) ? perfRes.data : [];
+        for (const r of perfList) {
+          const id = String(r.mp_id ?? r.marketplace?.id ?? '');
+          if (id) returnsByMp.set(id, Number(r.creturn_amount) || 0);
+        }
+      } catch (retErr) {
+        console.warn('[Warehouse Service] Retur (creturn) tidak tersedia:', retErr.message);
+      }
+
       const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
       const rows = list.map((r) => {
         const mp = r.marketplace || {};
         const owner = Array.isArray(r.user_marketplaces) ? r.user_marketplaces[0] : null;
+        const id = String(r.marketplace_id ?? mp.id ?? '');
         return {
-          id: String(r.mp_id ?? mp.id ?? ''),
-          name: mp.mp_name || mp.mp_username || String(r.mp_id ?? ''),
+          id,
+          name: mp.mp_name || mp.mp_username || id,
           username: mp.mp_username || '',
           type: mp.mp_type || 'other', // 'shopee' | 'tiktok' | ...
           owner: owner?.user?.name || '',
           ownerAlias: owner?.user_team?.alias || '',
-          orderCount: num(r.order_count),
+          orderCount: num(r.transaction_count),
           itemCount: num(r.item_count),
-          orderAmount: num(r.order_amount),   // omzet
-          itemAmount: num(r.item_amount),
-          spentAmount: num(r.spent_amount),   // HPP + biaya
-          adsTotal: num(r.ads_total),
-          estimatedProfit: num(r.estimated_profit),
-          profitLoss: num(r.profit_loss),     // laba/rugi bersih
-          returnAmount: num(r.creturn_amount),
-          wdAmount: num(r.wd_amount),
+          orderAmount: num(r.order_mp_total),      // omzet (Nilai Transaksi)
+          itemAmount: num(r.item_total),           // HPP barang
+          spentAmount: num(r.warehouse_fee_total), // biaya gudang (item_total + ini = order_total/HPP dashboard)
+          adsTotal: num(r.ads_total),              // Nilai Iklan
+          estimatedProfit: num(r.estimate_profit),
+          profitLoss: num(r.profit_loss),          // L/R (estimate - ads), = dashboard Gudang
+          returnAmount: returnsByMp.get(id) || 0,  // digabung dari endpoint lama
+          wdAmount: num(r.wd_total),
         };
       });
       return {
