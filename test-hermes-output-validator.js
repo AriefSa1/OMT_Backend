@@ -49,10 +49,28 @@ const invalidOutput = {
   }],
 };
 
+// Angka turunan yang tak ada di evidence TIDAK menolak analisa — dikosongkan + warning.
+const ungroundedNumberOutput = {
+  ...validOutput,
+  criticalFindings: [{
+    ...validOutput.criticalFindings[0],
+    evidenceIds: ['ev_ctr'],
+    impact: { metric: 'ctr', value: 99, unit: '%' },
+  }],
+  prioritizedActions: [{
+    ...validOutput.prioritizedActions[0],
+    baseline: { metric: 'ctr', value: 42, unit: '%' },
+  }],
+};
+const repaired = parseAndValidate(JSON.stringify(ungroundedNumberOutput), context);
+
 const checks = [
   ['valid output passes', validateAnalysisOutput(validOutput, context).valid === true],
   ['unknown evidence is rejected', validateAnalysisOutput(invalidOutput, context).valid === false],
-  ['unsupported numeric value is rejected', validateAnalysisOutput(invalidOutput, context).errors.some((error) => error.includes('99'))],
+  ['ungrounded numeric passes but is nulled', repaired.valid === true && repaired.analysis.criticalFindings[0].impact.value === null],
+  ['ungrounded baseline is nulled', repaired.analysis.prioritizedActions[0].baseline.value === null],
+  ['ungrounded numeric raises a warning', repaired.warnings.some((warning) => warning.includes('99') || warning.includes('42'))],
+  ['grounded numeric within float tolerance is kept', parseAndValidate(JSON.stringify({ ...validOutput, criticalFindings: [{ ...validOutput.criticalFindings[0], impact: { metric: 'ctr', value: 2.5000000001, unit: '%' } }] }), context).analysis.criticalFindings[0].impact.value === 2.5000000001],
   ['JSON parser validates output contract', parseAndValidate(JSON.stringify(validOutput), context).valid === true],
   ['invalid JSON is rejected', parseAndValidate('{not-json}', context).errorCode === 'INVALID_JSON'],
 ];

@@ -41,15 +41,35 @@ function validateEvidenceIds(ids, evidenceMap, path, errors, required = true) {
   }
 }
 
-function validateNumericValue(value, path, allowedValues, errors) {
+// Toleransi relatif kecil agar angka yang benar-benar dari evidence tidak ditolak
+// hanya karena selisih pembulatan float saat model menghitung ulang.
+const NUMERIC_MATCH_TOLERANCE = 1e-6;
+
+function isGroundedNumber(parsed, allowedValues) {
+  if (allowedValues.has(parsed)) return true;
+  for (const candidate of allowedValues) {
+    if (Math.abs(candidate - parsed) <= NUMERIC_MATCH_TOLERANCE * Math.max(1, Math.abs(candidate))) return true;
+  }
+  return false;
+}
+
+// Angka pada field terstruktur (impact/baseline/target) harus tervalidasi ke evidence.
+// Bila model mengisi angka turunan yang tak ada di ledger, kita TIDAK menolak seluruh
+// analisa — kita kosongkan angkanya (null) dan catat warning. Jaminan tetap terjaga:
+// angka tak berdasar tak pernah tampil, sementara prosa + sitasi evidence yang sah tetap
+// dirender. `container` dimutasi in-place agar output yang dikembalikan sudah bersih.
+function sanitizeNumericValue(container, key, path, allowedValues, warnings) {
+  const value = container[key];
   if (value === null || value === undefined) return;
   const parsed = finiteNumber(value);
   if (parsed === null) {
-    errors.push(`${path} harus berupa angka atau null.`);
+    container[key] = null;
+    warnings.push(`${path} bukan angka valid; dikosongkan.`);
     return;
   }
-  if (!allowedValues.has(parsed)) {
-    errors.push(`${path}=${parsed} tidak ditemukan pada trusted metrics atau evidence.`);
+  if (!isGroundedNumber(parsed, allowedValues)) {
+    container[key] = null;
+    warnings.push(`${path}=${parsed} tidak ada di evidence/trusted metrics; dikosongkan agar tidak menampilkan angka tak berdasar.`);
   }
 }
 
@@ -83,7 +103,7 @@ function validateAnalysisOutput(output, context = {}) {
       validateEvidenceIds(finding.evidenceIds, evidenceMap, `${path}.evidenceIds`, errors);
       if (finding.impact !== undefined) {
         if (!isPlainObject(finding.impact)) errors.push(`${path}.impact harus berupa object.`);
-        else validateNumericValue(finding.impact.value, `${path}.impact.value`, allowedValues, errors);
+        else sanitizeNumericValue(finding.impact, 'value', `${path}.impact.value`, allowedValues, warnings);
       }
     });
   }
@@ -131,7 +151,7 @@ function validateAnalysisOutput(output, context = {}) {
       for (const field of ['baseline', 'target']) {
         if (action[field] !== undefined) {
           if (!isPlainObject(action[field])) errors.push(`${path}.${field} harus berupa object.`);
-          else validateNumericValue(action[field].value, `${path}.${field}.value`, allowedValues, errors);
+          else sanitizeNumericValue(action[field], 'value', `${path}.${field}.value`, allowedValues, warnings);
         }
       }
       const baselineMetric = action.baseline?.metric ? normalizeMetricKey(context.intent, action.baseline.metric) : null;
