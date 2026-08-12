@@ -61,7 +61,9 @@ function sleep(ms) {
 class AIService {
   constructor() {
     this.apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-    this.modelName = 'gemini-2.5-flash';
+    // Model default hasil perbandingan head-to-head semua model free-tier (2026-08):
+    // gemini-3.6-flash paling lengkap + presisi + kritis. Override lewat env GEMINI_MODEL.
+    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
     this.ai = this.apiKey ? new GoogleGenAI({ apiKey: this.apiKey }) : null;
     this.openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
     this.openrouterConfigured = Boolean(this.openrouterApiKey);
@@ -211,27 +213,32 @@ class AIService {
    * classification attempted) so every caller can build a specific envelope without
    * re-deriving it.
    */
-  async generateJson(prompt, { maxRetries = 2 } = {}) {
+  async generateJson(prompt, { maxRetries = 2, model } = {}) {
     if (!this.ai) return null;
 
     let lastClassified = null;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
+        const activeModel = model || this.modelName;
+        const config = {
+          // Meminta JSON lewat kalimat prompt saja tidak cukup — briefing harian pernah
+          // gagal dengan JSON terpotong di tengah array. responseMimeType membuat API
+          // yang menjamin bentuknya, bukan kepatuhan model terhadap instruksi teks.
+          responseMimeType: 'application/json',
+          // Margin lega: model 3.x memakai "thinking" (tak bisa dimatikan) yang berbagi
+          // anggaran keluaran — 16k mencegah JSON terpotong. Masih jauh di bawah limit 65k.
+          maxOutputTokens: 16384,
+        };
+        // gemini-2.5-* mengaktifkan "thinking" default yang memotong anggaran keluaran →
+        // respons panjang terpotong, jadi dimatikan. Model 3.x MENOLAK thinkingBudget:0
+        // ("Thinking budget is not supported"), jadi hanya disetel untuk 2.5.
+        if (/^gemini-2\.5/.test(activeModel)) {
+          config.thinkingConfig = { thinkingBudget: 0 };
+        }
         const response = await this.ai.models.generateContent({
-          model: this.modelName,
+          model: activeModel,
           contents: prompt,
-          config: {
-            // Meminta JSON lewat kalimat prompt saja tidak cukup — briefing harian pernah
-            // gagal dengan JSON terpotong di tengah array. responseMimeType membuat API
-            // yang menjamin bentuknya, bukan kepatuhan model terhadap instruksi teks.
-            responseMimeType: 'application/json',
-            // gemini-2.5-flash mengaktifkan "thinking" secara default dan token berpikir itu
-            // dipotong dari anggaran keluaran yang sama. Untuk keluaran terstruktur seperti
-            // ini, itu memakan ruang yang seharusnya dipakai jawaban dan membuat respons
-            // panjang terpotong. Anggaran dinaikkan sekaligus berpikirnya dimatikan.
-            maxOutputTokens: 8192,
-            thinkingConfig: { thinkingBudget: 0 },
-          },
+          config,
         });
         const text = response.text || '';
         const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -260,7 +267,7 @@ class AIService {
    * differ per feature — this only removes the identical try/catch/log/envelope tail that
    * used to be copied five times.
    */
-  async callGemini({ prompt, trusted = {}, fallbackPayload = {}, failMessage, logLabel }) {
+  async callGemini({ prompt, trusted = {}, fallbackPayload = {}, failMessage, logLabel, model }) {
     // For rate-limited quota errors, skip Gemini retries and go straight to
     // OpenRouter fallback — daily quota won't reset within the 30-45s retry delay.
     // Only retry for UNAVAILABLE (5xx transient) or INVALID_RESPONSE (recoverable).
@@ -268,6 +275,7 @@ class AIService {
     try {
       const parsed = await this.generateJson(prompt, {
         maxRetries: skipGeminiRetry ? 0 : 2,
+        model,
       });
       return this.aiResult(parsed, trusted);
     } catch (err) {
@@ -585,9 +593,9 @@ risks: 1-3 item. dataGaps: hanya isi bila memang ada data "belum tersedia" di at
    * PRIMARY (bukan sekadar fallback). Ini yang membuat fitur AI tetap hidup saat toko
    * hanya mengandalkan OpenRouter.
    */
-  async runAnalysis({ prompt, trusted = {}, failMessage, logLabel }) {
+  async runAnalysis({ prompt, trusted = {}, failMessage, logLabel, model }) {
     if (this.ai) {
-      return this.callGemini({ prompt, trusted, failMessage, logLabel });
+      return this.callGemini({ prompt, trusted, failMessage, logLabel, model });
     }
     if (this.openrouterConfigured) {
       try {
@@ -612,6 +620,7 @@ risks: 1-3 item. dataGaps: hanya isi bila memang ada data "belum tersedia" di at
   async generateActionCenterAnalysis({
     periodLabel = '', store = {}, weekly = {}, funnelProducts = [],
     decliningProducts = [], adsCampaigns = [], stockRisks = [], existingSignals = [],
+    modelOverride = null,
   } = {}) {
     if (!this.ai && !this.openrouterConfigured) return this.notConfigured({ periodLabel });
 
@@ -687,6 +696,7 @@ priorityActions 3-6 item (paling berdampak dulu). deepDives 0-4 per area (isi ha
       trusted: { periodLabel },
       failMessage: 'Gagal menyusun analisa mendalam.',
       logLabel: 'action center analysis',
+      model: modelOverride,
     });
   }
 

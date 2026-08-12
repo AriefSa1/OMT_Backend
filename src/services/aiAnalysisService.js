@@ -43,7 +43,7 @@ class AiAnalysisService {
    * Analisa mendalam bersama untuk Pusat Optimasi, Aksi & Tugas, dan Wawasan Growth.
    * Merakit konteks KAYA dari snapshot lokal + tren storeStats, lalu memanggil mesin AI.
    */
-  async getActionCenterAnalysis({ periodLabel = '7 hari terakhir' } = {}) {
+  async getActionCenterAnalysis({ periodLabel = '7 hari terakhir', modelOverride = null } = {}) {
     const sessions = await prisma.storeSession.findMany({
       select: { storeId: true, isActive: true, updatedAt: true },
       orderBy: { updatedAt: 'desc' },
@@ -117,7 +117,7 @@ class AiAnalysisService {
     const existingSignals = (action?.recommendations || []).map((r) => ({ priority: r.priority, title: r.title }));
 
     const analysis = await aiService.generateActionCenterAnalysis({
-      periodLabel, store, weekly, funnelProducts, decliningProducts, adsCampaigns, stockRisks, existingSignals,
+      periodLabel, store, weekly, funnelProducts, decliningProducts, adsCampaigns, stockRisks, existingSignals, modelOverride,
     });
 
     return {
