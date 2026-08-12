@@ -212,7 +212,27 @@ class HermesCanonicalDataService {
       trustedMetrics: metrics,
       comparisons: {},
       details: {
-        campaigns: (result.topCampaigns || []).slice(0, 20),
+        // Hanya teruskan angka yang SUDAH berskala benar. Objek kampanye asli juga
+        // membawa field mentah (rawSpend/rawSales = nilai sebelum dibagi amountDivisor);
+        // bila ikut terkirim, model bisa keliru memakainya dan melaporkan spend ratusan
+        // kali lipat (mis. rawSpend 9,7 jt vs spend asli ~97 rb). Proyeksikan ke subset aman.
+        campaigns: (result.topCampaigns || []).slice(0, 20).map((campaign) => ({
+          id: campaign.id,
+          name: campaign.name,
+          type: campaign.type,
+          state: campaign.state,
+          dailyBudget: campaign.dailyBudget,
+          spend: campaign.spend,
+          sales: campaign.sales,
+          voucherSpend: campaign.voucherSpend,
+          voucherSales: campaign.voucherSales,
+          impressions: campaign.impressions,
+          clicks: campaign.clicks,
+          orders: campaign.orders,
+          itemSold: campaign.itemSold,
+          roas: campaign.roas,
+          ctr: campaign.ctr,
+        })),
         campaignCountMeasured: Array.isArray(result.topCampaigns) ? result.topCampaigns.length : 0,
       },
       evidence: evidenceRows,
