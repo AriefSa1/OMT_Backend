@@ -64,6 +64,12 @@ class AIService {
     // Model default hasil perbandingan head-to-head semua model free-tier (2026-08):
     // gemini-3.6-flash paling lengkap + presisi + kritis. Override lewat env GEMINI_MODEL.
     this.modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+    // Rantai fallback Gemini: kalau primary kena 429/transien, coba model berikutnya sebelum
+    // menyerah ke OpenRouter. Default 3.6-flash → 3.5-flash → 2.5-flash (jaring stabil).
+    // Atur via env GEMINI_FALLBACK_MODELS (koma). Duplikat & kosong dibuang.
+    const fallbacks = (process.env.GEMINI_FALLBACK_MODELS || 'gemini-3.5-flash,gemini-2.5-flash')
+      .split(',').map((s) => s.trim()).filter(Boolean);
+    this.geminiModelChain = [this.modelName, ...fallbacks].filter((m, i, arr) => arr.indexOf(m) === i);
     this.ai = this.apiKey ? new GoogleGenAI({ apiKey: this.apiKey }) : null;
     this.openrouterApiKey = process.env.OPENROUTER_API_KEY || '';
     this.openrouterConfigured = Boolean(this.openrouterApiKey);
@@ -193,13 +199,13 @@ class AIService {
    * Live model result. `parsed` is spread FIRST so model output cannot overwrite the
    * envelope, nor the deterministic blocks the caller passes in `trusted`.
    */
-  aiResult(parsed, trusted = {}) {
+  aiResult(parsed, trusted = {}, meta = {}) {
     return {
       ...parsed,
       ...trusted,
       success: true,
-      provider: 'REAL_GEMINI_API',
-      model: this.modelName,
+      provider: meta.provider || 'REAL_GEMINI_API',
+      model: meta.model || this.modelName,
     };
   }
 
@@ -268,38 +274,49 @@ class AIService {
    * used to be copied five times.
    */
   async callGemini({ prompt, trusted = {}, fallbackPayload = {}, failMessage, logLabel, model }) {
-    // For rate-limited quota errors, skip Gemini retries and go straight to
-    // OpenRouter fallback — daily quota won't reset within the 30-45s retry delay.
-    // Only retry for UNAVAILABLE (5xx transient) or INVALID_RESPONSE (recoverable).
+    // For rate-limited quota errors, skip Gemini retries and go straight to the next model /
+    // OpenRouter — daily quota won't reset within the 30-45s retry delay. Retry in-model only
+    // for UNAVAILABLE (5xx transient) or INVALID_RESPONSE (recoverable).
     const skipGeminiRetry = this.openrouterConfigured;
-    try {
-      const parsed = await this.generateJson(prompt, {
-        maxRetries: skipGeminiRetry ? 0 : 2,
-        model,
-      });
-      return this.aiResult(parsed, trusted);
-    } catch (err) {
-      const code = err.aiErrorCode || 'UNKNOWN';
-      const isTransient = code === 'RATE_LIMITED' || code === 'UNAVAILABLE';
+    // Rantai model: `model` eksplisit (mis. dari perbandingan) → hanya model itu, tanpa
+    // fallback. Selain itu → primary + fallback (default 3.6-flash → 3.5-flash → 2.5-flash),
+    // agar 429/kegagalan transien satu model otomatis lanjut ke model berikutnya.
+    const chain = model ? [model] : this.geminiModelChain;
+    let lastErr = null;
 
-      // On transient failures (rate limit, 5xx), try OpenRouter free-tier as fallback
-      // before giving up. This keeps AI panels usable when Gemini quota is exhausted.
-      if (isTransient && this.openrouterConfigured) {
-        console.warn(`[AI Service] ${logLabel || 'Gemini'} rate-limited/unavailable, trying OpenRouter fallback...`);
-        try {
-          const orParsed = await this.generateJsonWithOpenRouter(prompt);
-          if (orParsed) {
-            return this.aiResult(orParsed, { ...trusted, provider: 'REAL_OPENROUTER_API' });
-          }
-        } catch (orErr) {
-          console.warn(`[AI Service] OpenRouter fallback also failed:`, orErr.message);
-        }
+    for (let i = 0; i < chain.length; i += 1) {
+      const activeModel = chain[i];
+      try {
+        const parsed = await this.generateJson(prompt, { maxRetries: skipGeminiRetry ? 0 : 2, model: activeModel });
+        if (i > 0) console.warn(`[AI Service] ${logLabel || 'Gemini'} memakai model fallback: ${activeModel}`);
+        return this.aiResult(parsed, trusted, { model: activeModel });
+      } catch (err) {
+        lastErr = err;
+        const code = err.aiErrorCode || 'UNKNOWN';
+        // Coba model berikutnya untuk kegagalan yang MUNGKIN spesifik-model: 429 (rate limit),
+        // 5xx (unavailable), 404 (model hilang/di-deprecate), atau JSON rusak (model lain bisa
+        // balas benar). HTTP 400/UNKNOWN = bad request yang sama untuk semua model → berhenti.
+        if (!['RATE_LIMITED', 'UNAVAILABLE', 'HTTP_404', 'INVALID_RESPONSE'].includes(code)) break;
+        if (i < chain.length - 1) console.warn(`[AI Service] ${logLabel || 'Gemini'} model ${activeModel} ${code}, coba model berikutnya…`);
       }
-
-      const message = isTransient ? err.aiErrorMessage : (failMessage || err.aiErrorMessage);
-      console.warn(`[AI Service] ${logLabel || 'Gemini'} error (${code}): ${err.message}`);
-      return this.aiFailed({ ...trusted, ...fallbackPayload }, message, code);
     }
+
+    const code = lastErr?.aiErrorCode || 'UNKNOWN';
+    const isTransient = code === 'RATE_LIMITED' || code === 'UNAVAILABLE';
+    // Seluruh rantai Gemini gagal transien → OpenRouter free-tier sebagai jaring terakhir.
+    if (isTransient && this.openrouterConfigured) {
+      console.warn(`[AI Service] ${logLabel || 'Gemini'} semua model rate-limited, mencoba OpenRouter…`);
+      try {
+        const orParsed = await this.generateJsonWithOpenRouter(prompt);
+        if (orParsed) return this.aiResult(orParsed, trusted, { provider: 'REAL_OPENROUTER_API', model: 'openrouter' });
+      } catch (orErr) {
+        console.warn('[AI Service] OpenRouter fallback also failed:', orErr.message);
+      }
+    }
+
+    const message = isTransient ? lastErr?.aiErrorMessage : (failMessage || lastErr?.aiErrorMessage);
+    console.warn(`[AI Service] ${logLabel || 'Gemini'} error (${code}): ${lastErr?.message}`);
+    return this.aiFailed({ ...trusted, ...fallbackPayload }, message, code);
   }
 
   // 3. FITUR 1: AI Automated Copywriter & A/B Testing Variations Generator
