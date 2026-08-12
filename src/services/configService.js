@@ -21,6 +21,10 @@ class ConfigService {
     const config = { ...DEFAULTS };
 
     for (const row of rows) {
+      // Baris DB kosong (''/null) JANGAN menimpa default dari env. Dulu sebuah baris
+      // `geminiApiKey=''` di DB diam-diam mengosongkan `GEMINI_API_KEY` dari env — di
+      // lokal maupun Render — sehingga key yang sudah diset via env tak pernah aktif.
+      if (row.value === '' || row.value === null || row.value === undefined) continue;
       config[row.key] = row.value;
     }
 
