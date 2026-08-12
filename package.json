@@ -12,6 +12,11 @@
     "prisma:db:push": "prisma db push",
     "prisma:migrate:dev": "prisma migrate dev",
     "test:ai": "node test-ai-suite.js",
+    "test:hermes": "node test-hermes-agent.js",
+    "test:hermes-analysis": "node test-hermes-analysis.js",
+    "test:hermes-ranges": "node test-hermes-range-output.js",
+    "test:shopee-product-pagination": "node test-shopee-product-pagination.js",
+    "test:shopee-dashboard-ranges": "node test-shopee-dashboard-range.js",
     "docs": "node docs/index.js",
     "docs:ai": "node docs/explain-ai.js"
   },

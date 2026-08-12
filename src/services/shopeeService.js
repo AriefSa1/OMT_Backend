@@ -1629,7 +1629,20 @@ class ShopeeService {
     storeId = null,
   } = {}) {
     const session = await this.getActiveSession(storeId);
-    const timeRange = getPeriodTimeRange(period, customStart, customEnd);
+    const requestedTimeRange = getPeriodTimeRange(period, customStart, customEnd);
+    const timeSpanDays = Math.max(1, Math.round((requestedTimeRange.endTime - requestedTimeRange.startTime) / 86400) + 1);
+    // Seller Center accepts custom start/end timestamps but rejects `period=custom` on
+    // the product-performance endpoint. Keep the exact timestamps and send the closest
+    // accepted period enum so the response matches the selected date range.
+    const apiPeriod = requestedTimeRange.period === 'custom'
+      ? (timeSpanDays <= 7 ? 'past7days' : 'past30days')
+      : requestedTimeRange.period;
+    // Seller Center ignores custom timestamps on this endpoint and returns the
+    // native bucket. Report that effective bucket instead of labelling native
+    // data with a user-selected range it did not actually measure.
+    const timeRange = requestedTimeRange.period === 'custom'
+      ? getPeriodTimeRange(apiPeriod)
+      : requestedTimeRange;
 
     if (!session?.cookieString || !session?.storeId) {
       return {
@@ -1639,7 +1652,7 @@ class ShopeeService {
         dataSource: 'EMPTY',
         storeName: '',
         storeId: '',
-        period: timeRange.period,
+        period: apiPeriod,
         startTime: timeRange.startTime,
         endTime: timeRange.endTime,
         total: 0,
@@ -1668,45 +1681,69 @@ class ShopeeService {
       if (!csrfToken) throw new Error('Sesi Shopee aktif tidak memiliki token CSRF.');
 
       const apiOrderBy = SHOPEE_ORDER_BY[orderBy] || 'confirmed_sales.desc';
-      const queryParams = new URLSearchParams({
-        SPC_CDS: csrfToken,
-        SPC_CDS_VER: '2',
-        start_time: String(timeRange.startTime),
-        end_time: String(timeRange.endTime),
-        period: timeRange.period,
-        keyword: keyword || '',
-        category_type: categoryType || 'shopee',
-        category_id: String(categoryId ?? '-1'),
-        page_size: String(pageSize || 10),
-        page_num: String(pageNum || 1),
-        order_type: orderType || 'confirmed',
-        order_by: apiOrderBy,
-      });
+      const fetchRawPage = async (requestedPageSize, requestedPageNum) => {
+        const queryParams = new URLSearchParams({
+          SPC_CDS: csrfToken,
+          SPC_CDS_VER: '2',
+          start_time: String(timeRange.startTime),
+          end_time: String(timeRange.endTime),
+          period: apiPeriod,
+          keyword: keyword || '',
+          category_type: categoryType || 'shopee',
+          category_id: String(categoryId ?? '-1'),
+          page_size: String(requestedPageSize || 10),
+          page_num: String(requestedPageNum || 1),
+          order_type: orderType || 'confirmed',
+          order_by: apiOrderBy,
+        });
 
-      const url = `${SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT}?${queryParams.toString()}`;
-      const response = await shopeeRequest({
-        method: 'get',
-        url,
-        headers: {
-          ...getShopeeHeaders(session.cookieString, csrfToken, session.userAgent),
-          Referer: 'https://seller.shopee.co.id/portal/datacenter/product/performance',
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000,
-      });
+        const response = await shopeeRequest({
+          method: 'get',
+          url: `${SHOPEE_PRODUCT_PERFORMANCE_ENDPOINT}?${queryParams.toString()}`,
+          headers: {
+            ...getShopeeHeaders(session.cookieString, csrfToken, session.userAgent),
+            Referer: 'https://seller.shopee.co.id/portal/datacenter/product/performance',
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        });
 
-      const envelope = response.data || {};
-      if (envelope.code !== 0 && envelope.code !== undefined && envelope.code !== null && envelope.code !== 200) {
-        throw new Error(envelope.message || envelope.msg || 'Shopee Product Performance API mengembalikan respons gagal.');
-      }
+        const envelope = response.data || {};
+        if (envelope.code !== 0 && envelope.code !== undefined && envelope.code !== null && envelope.code !== 200) {
+          throw new Error(envelope.message || envelope.msg || 'Shopee Product Performance API mengembalikan respons gagal.');
+        }
 
-      const dataContainer = envelope.data || envelope.result || {};
-      const rawList = Array.isArray(dataContainer.items)
-        ? dataContainer.items
-        : (Array.isArray(dataContainer.list)
-          ? dataContainer.list
-          : (Array.isArray(dataContainer.products) ? dataContainer.products : []));
+        const dataContainer = envelope.data || envelope.result || {};
+        const rawList = Array.isArray(dataContainer.items)
+          ? dataContainer.items
+          : (Array.isArray(dataContainer.list)
+            ? dataContainer.list
+            : (Array.isArray(dataContainer.products) ? dataContainer.products : []));
+
+        return { dataContainer, rawList };
+      };
+
+      const firstPage = await fetchRawPage(pageSize, pageNum);
+      const { dataContainer, rawList } = firstPage;
+
       const totalCount = asFiniteNumber(dataContainer.total ?? dataContainer.total_count ?? rawList.length);
+
+      // Seller Center does not provide a summary for this endpoint and caps a
+      // response at 50 rows. KPI totals must therefore be calculated from every
+      // result page, not from the page currently visible in the table.
+      const aggregationPageSize = 50;
+      let aggregationRows = rawList;
+      const aggregationTotalPages = Math.ceil(totalCount / aggregationPageSize);
+      const canReuseFirstPage = Number(pageNum) === 1 && Number(pageSize) >= aggregationPageSize;
+      if (aggregationTotalPages > 1 || !canReuseFirstPage) {
+        const pageNumbers = Array.from({ length: aggregationTotalPages || 1 }, (_, index) => index + 1);
+        const pageResults = await Promise.all(pageNumbers.map(async (requestedPageNum) => {
+          if (canReuseFirstPage && requestedPageNum === 1) return firstPage.rawList;
+          const page = await fetchRawPage(aggregationPageSize, requestedPageNum);
+          return page.rawList;
+        }));
+        aggregationRows = pageResults.flat();
+      }
 
       const catalogProducts = await prisma.shopeeProduct.findMany({
         where: { storeId: session.storeId },
@@ -1728,7 +1765,7 @@ class ShopeeService {
 
         const confirmedSales = asFiniteNumber(item.confirmed_sales ?? item.sales ?? item.gmv ?? 0);
         const confirmedOrders = asFiniteNumber(item.confirmed_order ?? item.confirmed_orders ?? item.orders ?? 0);
-        const confirmedUnits = asFiniteNumber(item.confirmed_units ?? item.units_sold ?? item.item_sold ?? 0);
+        const confirmedUnits = asFiniteNumber(item.confirmed_units ?? item.confirmed_unit_num ?? item.units_sold ?? item.item_sold ?? 0);
         const confirmedBuyers = asFiniteNumber(item.confirmed_buyers ?? item.buyers ?? 0);
 
         const views = asFiniteNumber(item.pv ?? item.item_views ?? item.views ?? item.impressions ?? 0);
@@ -1763,12 +1800,21 @@ class ShopeeService {
       });
 
       const rawSummary = dataContainer.summary || {};
-      const totalSales = asFiniteNumber(rawSummary.confirmed_sales ?? products.reduce((acc, item) => acc + item.confirmedSales, 0));
-      const totalOrders = asFiniteNumber(rawSummary.confirmed_order ?? products.reduce((acc, item) => acc + item.confirmedOrders, 0));
-      const totalUnits = asFiniteNumber(rawSummary.confirmed_units ?? products.reduce((acc, item) => acc + item.confirmedUnits, 0));
-      const totalViews = asFiniteNumber(rawSummary.item_views ?? products.reduce((acc, item) => acc + item.views, 0));
-      const totalVisitors = asFiniteNumber(rawSummary.item_uv ?? products.reduce((acc, item) => acc + item.visitors, 0));
-      const totalBuyers = asFiniteNumber(rawSummary.confirmed_buyers ?? products.reduce((acc, item) => acc + item.confirmedBuyers, 0));
+      const aggregateMetricRows = aggregationRows.map((item) => ({
+        confirmedSales: asFiniteNumber(item.confirmed_sales ?? item.sales ?? item.gmv ?? 0),
+        confirmedOrders: asFiniteNumber(item.confirmed_order ?? item.confirmed_orders ?? item.orders ?? 0),
+        confirmedUnits: asFiniteNumber(item.confirmed_units ?? item.confirmed_unit_num ?? item.units_sold ?? item.item_sold ?? 0),
+        confirmedBuyers: asFiniteNumber(item.confirmed_buyers ?? item.buyers ?? 0),
+        views: asFiniteNumber(item.pv ?? item.item_views ?? item.views ?? item.impressions ?? 0),
+        visitors: asFiniteNumber(item.uv ?? item.item_uv ?? item.unique_visitors ?? 0),
+      }));
+      const sumAggregateMetric = (field) => aggregateMetricRows.reduce((acc, item) => acc + item[field], 0);
+      const totalSales = asFiniteNumber(rawSummary.confirmed_sales ?? sumAggregateMetric('confirmedSales'));
+      const totalOrders = asFiniteNumber(rawSummary.confirmed_order ?? rawSummary.confirmed_orders ?? sumAggregateMetric('confirmedOrders'));
+      const totalUnits = asFiniteNumber(rawSummary.confirmed_units ?? rawSummary.confirmed_unit_num ?? sumAggregateMetric('confirmedUnits'));
+      const totalViews = asFiniteNumber(rawSummary.item_views ?? rawSummary.pv ?? sumAggregateMetric('views'));
+      const totalVisitors = asFiniteNumber(rawSummary.item_uv ?? rawSummary.uv ?? sumAggregateMetric('visitors'));
+      const totalBuyers = asFiniteNumber(rawSummary.confirmed_buyers ?? sumAggregateMetric('confirmedBuyers'));
       const averageConversionRate = totalVisitors > 0
         ? (totalOrders / totalVisitors) * 100
         : normalizeRatePercent(rawSummary.conversion_rate, 0);

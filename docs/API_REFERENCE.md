@@ -208,6 +208,14 @@ nilai di luar map itu jatuh ke `confirmed_sales.desc`.
   period, startTime, endTime, message,
 }
 ```
+Catatan penting: endpoint Seller Center ini tidak mengirim `summary` dan membatasi hasil
+menjadi maksimal 50 item per halaman. `summary` di atas dihitung dari seluruh halaman
+yang cocok dengan filter, sedangkan `products` hanya halaman yang diminta. `totalOrders`,
+`totalBuyers`, `totalViews`, dan `totalVisitors` adalah agregat pada grain produk; jangan
+menyamakan `totalOrders` dengan buyer/order unik toko pada Product Overview tanpa
+rekonsiliasi definisi metrik. `totalSales` dan `totalUnits` dapat dibandingkan dengan
+`confirmed_gmv` dan `confirmed_unit_num` pada Product Overview untuk periode native yang
+sama.
 
 ### `GET /api/shopee/traffic-sources`
 Live-only, tanpa snapshot fallback (`shopeeService.fetchTrafficSources`). Query: `days` (≤30).
@@ -391,3 +399,97 @@ tidak ada model yang menghitungnya; lihat `AGENTS.md` § AI feature / dead code 
 
 `/api/ai/*` didokumentasikan terpisah karena sifatnya berbeda (bergantung kuota Gemini
 eksternal, punya retry/klasifikasi error sendiri). Ringkasan cepat: `npm run docs:ai`.
+
+## Hermes Agent lokal
+
+Jalur Hermes dibuat terpisah dari `/api/ai/*` dan tidak mengubah provider Gemini/OpenRouter.
+Endpoint ini membutuhkan autentikasi aplikasi yang sama dengan endpoint terlindungi lainnya.
+
+### `GET /api/hermes/status`
+
+Mengembalikan konfigurasi lokal Hermes tanpa melakukan probe ke service upstream. Field
+`availability` selalu `NOT_CHECKED` sampai probe eksplisit ditambahkan; aplikasi tidak boleh
+menampilkan status online berdasarkan konfigurasi saja.
+
+### `POST /api/hermes/chat`
+
+Meneruskan request ke Hermes OpenAI-compatible `POST /v1/chat/completions`.
+
+Body minimal:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Halo Hermes" }
+  ]
+}
+```
+
+Field opsional yang diteruskan: `model`, `temperature`, `maxTokens`, `conversation`, dan
+`previousResponseId`. Streaming sengaja belum diaktifkan pada tahap eksperimen awal.
+
+Response sukses membungkus response asli Hermes di field `response`:
+
+```json
+{
+  "success": true,
+  "provider": "HERMES_AGENT",
+  "model": "hermes-agent",
+  "response": { "id": "...", "choices": [] }
+}
+```
+
+Konfigurasi lokal berada di `.env`: `HERMES_AGENT_ENABLED`, `HERMES_AGENT_BASE_URL`,
+`HERMES_AGENT_API_KEY`, `HERMES_AGENT_MODEL`, dan `HERMES_AGENT_TIMEOUT_MS`. Default URL
+adalah `http://127.0.0.1:8642/v1`, sesuai API server Hermes Agent.
+
+### `POST /api/hermes/analyze/validate`
+
+Memvalidasi apakah data aplikasi cukup aman untuk analisa terarah sebelum konteks dikirim
+ke Hermes. Endpoint ini tidak memanggil Hermes. Intent yang didukung adalah `IKLAN`,
+`PERFORMA_TOKO`, dan `PERFORMA_PRODUK` (juga menerima label pengguna `Iklan`, `Performa
+Toko`, dan `Performa Produk`). Jika `startDate` dan `endDate` tidak dikirim, backend
+menggunakan tepat 30 tanggal kalender terakhir: hari ini dan 29 hari sebelumnya menurut
+zona waktu Asia/Jakarta.
+
+Body opsional:
+
+```json
+{
+  "intent": "PERFORMA_PRODUK",
+  "storeId": "store-example",
+  "startDate": "2026-07-14",
+  "endDate": "2026-08-12"
+}
+```
+
+Hasil validasi memiliki `quality.status` berikut:
+
+- `SAFE`: sumber utama memenuhi coverage dan freshness minimum; konteks boleh dianalisa
+  penuh sesuai klaim yang diizinkan.
+- `LIMITED`: konteks hanya boleh dipakai untuk diagnosis kualitas data. Hermes tidak
+  dipanggil karena coverage, freshness, ukuran sampel, atau rekonsiliasi belum aman.
+- `BLOCKED`: sumber utama tidak tersedia, toko tidak terikat pada akun, atau data tidak
+  memiliki baris valid. Request analisa tidak boleh diteruskan ke Hermes.
+
+Ambang default yang dikembalikan pada `quality.thresholds` adalah coverage minimum 50%,
+coverage aman 80%, freshness maksimum 48 jam untuk iklan/toko dan 72 jam untuk produk,
+minimal 2 baris campaign untuk konteks kampanye, serta minimal 5 produk terukur untuk
+perbandingan portfolio. Nilai yang tidak memiliki sumber atau denominator tetap `null`,
+bukan `0`. `dataGaps` dan `blockedClaims` harus dibawa ke prompt agar Hermes tidak
+menyimpulkan profit, cancellation rate, rating toko, stok gudang, kategori, atau forecast
+yang belum didukung data.
+
+### `POST /api/hermes/analyze`
+
+Menjalankan validasi yang sama secara server-side, membangun `TRUSTED_CONTEXT` yang
+dibatasi pada toko milik user (atau toko target yang diizinkan untuk `ADMIN`), lalu
+mengirim konteks terstruktur ke Hermes. Endpoint ini menolak dengan `422 DATA_BLOCKED`
+ketika status kualitas `BLOCKED`, sehingga data tidak pernah dikirim ke agent dalam kondisi
+tersebut. Status `LIMITED` juga tidak diteruskan ke Hermes; hanya status `SAFE` yang boleh
+memanggil agent. Body intent dan rentang tanggal sama dengan endpoint validasi.
+
+Response sukses mengembalikan `quality`, `period`, `dataGaps`, dan `analysis` JSON yang
+berisi `executiveVerdict`, `criticalFindings`, `rootCauseAnalysis`, dan
+`prioritizedActions`. Angka aritmetika seperti ROAS, CTR, AOV, dan conversion rate dihitung
+di backend dari field sumber; Hermes hanya menafsirkan angka trusted tersebut.
