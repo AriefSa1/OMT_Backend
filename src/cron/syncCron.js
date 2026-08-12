@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const jobQueueService = require('../services/jobQueueService');
+const hermesMemoryService = require('../services/hermesMemoryService');
 
 let scheduledJobs = [];
 
@@ -32,6 +33,20 @@ function initCronJobs(interval = '15m') {
       console.error('[CRON] Gagal mengantrekan sync job:', error.message);
     }
   }));
+
+  // Sweep harian: menangkap outcome rekomendasi Hermes pada satu hari kalender saat
+  // jendela pasca-tindakan sejajar dengan rolling window sumber kanonik live. Berjalan
+  // 01:30 Asia/Jakarta agar hari sebelumnya sudah tertutup penuh sebelum diukur.
+  scheduledJobs.push(cron.schedule('30 1 * * *', async () => {
+    try {
+      const summary = await hermesMemoryService.evaluateDueActions();
+      if (summary.available && (summary.evaluated || summary.mismatched || summary.errored)) {
+        console.log(`[CRON] Hermes evaluasi outcome — dievaluasi ${summary.evaluated}, mismatch ${summary.mismatched}, error ${summary.errored} dari ${summary.scanned} kandidat.`);
+      }
+    } catch (error) {
+      console.error('[CRON] Gagal menjalankan sweep evaluasi Hermes:', error.message);
+    }
+  }, { timezone: 'Asia/Jakarta' }));
 }
 
 module.exports = { initCronJobs };

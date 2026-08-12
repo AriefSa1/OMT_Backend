@@ -15,9 +15,12 @@ const FEEDBACK_REASONS = new Set([
 const ACTION_STATUSES = new Set(['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'SKIPPED', 'CANCELLED']);
 const EVALUATION_WINDOWS = new Set([7, 30]);
 
-function memoryStoreConfigured() {
-  const url = String(process.env.DATABASE_URL || '');
-  return url.startsWith('postgresql://') || url.startsWith('postgres://') || url.startsWith('prisma://');
+// Memori tersedia jika Prisma Client memang memiliki model Hermes (sudah di-generate
+// dari schema ini). Ini capability check yang akurat — bukan menebak dari string
+// DATABASE_URL — sehingga tetap benar untuk koneksi Postgres langsung maupun Accelerate
+// (prisma://), dan menonaktifkan learning loop secara bersih bila migrasi belum dijalankan.
+function isMemoryStoreAvailable() {
+  return Boolean(prisma && prisma.hermesAnalysisMemory);
 }
 
 function finiteNumber(value) {
@@ -206,8 +209,7 @@ function publicAction(action) {
 
 class HermesMemoryService {
   async persistAnalysis({ userId, storeId, context, result }) {
-    if (!memoryStoreConfigured() || !userId || !storeId || !context?.period || !result?.analysis) return null;
-    if (!prisma.hermesAnalysisMemory) throw new Error('Prisma Client belum memiliki HermesAnalysisMemory. Jalankan prisma generate.');
+    if (!isMemoryStoreAvailable() || !userId || !storeId || !context?.period || !result?.analysis) return null;
     return prisma.hermesAnalysisMemory.create({
       data: {
         userId: String(userId),
@@ -242,7 +244,7 @@ class HermesMemoryService {
   }
 
   async listMemories({ userId, storeId, intent, limit = 20 } = {}) {
-    if (!memoryStoreConfigured() || !userId || !prisma.hermesAnalysisMemory) return [];
+    if (!isMemoryStoreAvailable() || !userId) return [];
     const where = { userId: String(userId) };
     if (storeId) where.storeId = String(storeId);
     if (intent) where.intent = String(intent);
@@ -275,7 +277,7 @@ class HermesMemoryService {
   }
 
   async getMemory({ userId, id } = {}) {
-    if (!memoryStoreConfigured() || !userId || !id || !prisma.hermesAnalysisMemory) return null;
+    if (!isMemoryStoreAvailable() || !userId || !id) return null;
     let row;
     try {
       row = await prisma.hermesAnalysisMemory.findFirst({
@@ -307,6 +309,7 @@ class HermesMemoryService {
   }
 
   async saveFeedback({ userId, analysisId, rating, reasons = [], comment = null }) {
+    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; feedback tidak dapat disimpan.' };
     const normalized = String(rating || '').toUpperCase();
     if (!FEEDBACK_RATINGS.has(normalized)) return { success: false, errorCode: 'INVALID_FEEDBACK', message: 'Rating feedback tidak dikenali.' };
     const normalizedReasons = [...new Set((Array.isArray(reasons) ? reasons : [reasons])
@@ -323,6 +326,7 @@ class HermesMemoryService {
   }
 
   async createAction({ userId, analysisId, recommendationIndex }) {
+    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; tindakan tidak dapat dicatat.' };
     const memory = await prisma.hermesAnalysisMemory.findFirst({ where: { id: String(analysisId), userId: String(userId) } });
     if (!memory) return { success: false, errorCode: 'MEMORY_NOT_FOUND', message: 'Memori analisa tidak ditemukan untuk pengguna ini.' };
     const analysis = parseJson(memory.analysisJson, {});
@@ -341,6 +345,7 @@ class HermesMemoryService {
   }
 
   async updateAction({ userId, actionId, status, notes }) {
+    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; status tindakan tidak dapat diperbarui.' };
     const normalized = String(status || '').toUpperCase();
     if (!ACTION_STATUSES.has(normalized)) return { success: false, errorCode: 'INVALID_ACTION_STATUS', message: 'Status tindakan tidak dikenali.' };
     const current = await prisma.hermesRecommendationAction.findFirst({ where: { id: String(actionId), userId: String(userId) } });
@@ -367,20 +372,28 @@ class HermesMemoryService {
   }
 
   async evaluateAction({ userId, actionId, windowDays }) {
+    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; evaluasi tidak dapat dijalankan.' };
     const window = Number(windowDays);
     if (!EVALUATION_WINDOWS.has(window)) return { success: false, errorCode: 'INVALID_EVALUATION_WINDOW', message: 'Jendela evaluasi hanya 7 atau 30 hari.' };
     const action = await prisma.hermesRecommendationAction.findFirst({ where: { id: String(actionId), userId: String(userId) }, include: { analysis: true } });
     if (!action) return { success: false, errorCode: 'ACTION_NOT_FOUND', message: 'Tindakan tidak ditemukan untuk pengguna ini.' };
     const current = await prisma.hermesRecommendationEvaluation.findUnique({ where: { actionId_windowDays: { actionId: action.id, windowDays: window } } });
     if (!action.completedAt) return { success: true, evaluation: publicEvaluation(current), message: 'Tindakan belum ditandai selesai; evaluasi belum dimulai.' };
-    const eligibleAt = action.completedAt.getTime() + (window * 86400000);
-    if (Date.now() < eligibleAt) {
-      const remainingDays = Math.ceil((eligibleAt - Date.now()) / 86400000);
+    // Eligibility berbasis hari kalender (bukan selisih milidetik persis). Sumber
+    // kanonik live hanya menyajikan rolling window yang berakhir hari ini, jadi jendela
+    // pasca-tindakan hanya sejajar pada satu hari: `tanggalSelesai + windowDays`. Dengan
+    // menggerbang pada hari kalender — bukan jam persis penyelesaian — sweep harian
+    // otomatis (atau pengguna) bisa menangkap outcome kapan pun pada hari yang sejajar itu.
+    const eligibleDateKey = shiftDateKey(dateKey(action.completedAt), window);
+    const todayKey = dateKey();
+    if (todayKey < eligibleDateKey) {
       const requestedRange = postActionRange(action.completedAt, window);
+      const remainingDays = Math.max(1, Math.round((Date.parse(`${eligibleDateKey}T00:00:00.000Z`) - Date.parse(`${todayKey}T00:00:00.000Z`)) / 86400000));
+      const note = `Belum waktunya: outcome ${window} hari akan diukur otomatis pada ${eligibleDateKey} (±${remainingDays} hari lagi).`;
       const updated = await prisma.hermesRecommendationEvaluation.upsert({
         where: { actionId_windowDays: { actionId: action.id, windowDays: window } },
-        update: { status: 'NOT_READY', periodStatus: 'NOT_CHECKED', windowStartDate: requestedRange.startDate, windowEndDate: requestedRange.endDate, notes: `Belum waktunya: masih sekitar ${remainingDays} hari sebelum evaluasi ${window} hari.` },
-        create: { userId: String(userId), actionId: action.id, windowDays: window, status: 'NOT_READY', periodStatus: 'NOT_CHECKED', windowStartDate: requestedRange.startDate, windowEndDate: requestedRange.endDate, notes: `Belum waktunya: masih sekitar ${remainingDays} hari sebelum evaluasi ${window} hari.` },
+        update: { status: 'NOT_READY', periodStatus: 'NOT_CHECKED', windowStartDate: requestedRange.startDate, windowEndDate: requestedRange.endDate, notes: note },
+        create: { userId: String(userId), actionId: action.id, windowDays: window, status: 'NOT_READY', periodStatus: 'NOT_CHECKED', windowStartDate: requestedRange.startDate, windowEndDate: requestedRange.endDate, notes: note },
       });
       return { success: true, evaluation: publicEvaluation(updated), message: 'Jendela evaluasi belum mencapai batas waktunya.' };
     }
@@ -459,8 +472,45 @@ class HermesMemoryService {
     return { success: true, evaluation: publicEvaluation(evaluation), message: 'Outcome berhasil dievaluasi dari sumber kanonik.' };
   }
 
+  // Sweep otomatis: menangkap outcome tindakan pada hari kalender di mana jendela
+  // pasca-tindakan sejajar dengan rolling window sumber kanonik live. Dipanggil sekali
+  // per hari oleh cron; hanya menyentuh evaluasi berstatus NOT_READY yang sudah jatuh
+  // tempo, jadi baris yang sudah EVALUATED/PERIOD_MISMATCH tidak diproses ulang.
+  async evaluateDueActions({ limit = 200 } = {}) {
+    if (!isMemoryStoreAvailable()) return { available: false, scanned: 0, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
+    const todayKey = dateKey();
+    let rows;
+    try {
+      rows = await prisma.hermesRecommendationEvaluation.findMany({
+        where: { status: 'NOT_READY' },
+        include: { action: true },
+        take: Math.min(Math.max(Number(limit) || 200, 1), 1000),
+      });
+    } catch {
+      return { available: false, scanned: 0, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
+    }
+    const summary = { available: true, scanned: rows.length, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
+    for (const row of rows) {
+      const completedAt = row.action?.completedAt;
+      if (!completedAt) { summary.pending += 1; continue; }
+      const eligibleDateKey = shiftDateKey(dateKey(completedAt), row.windowDays);
+      if (todayKey < eligibleDateKey) { summary.pending += 1; continue; }
+      try {
+        const result = await this.evaluateAction({ userId: row.userId, actionId: row.actionId, windowDays: row.windowDays });
+        const status = result?.evaluation?.status;
+        if (status === 'EVALUATED') summary.evaluated += 1;
+        else if (status === 'PERIOD_MISMATCH') summary.mismatched += 1;
+        else summary.pending += 1;
+      } catch (error) {
+        summary.errored += 1;
+        console.warn('[Hermes] evaluateDueActions gagal untuk evaluasi', row.id, error.message);
+      }
+    }
+    return summary;
+  }
+
   async getLearningContext({ userId, storeId, intent, limit = 10 } = {}) {
-    if (!memoryStoreConfigured() || !userId || !prisma.hermesAnalysisMemory) return { memoryCount: 0, feedback: [], outcomes: [], note: 'Memori belum tersedia.' };
+    if (!isMemoryStoreAvailable() || !userId) return { memoryCount: 0, feedback: [], outcomes: [], note: 'Memori belum tersedia.' };
     let rows;
     try {
       rows = await prisma.hermesAnalysisMemory.findMany({
@@ -497,6 +547,7 @@ class HermesMemoryService {
 
 const service = new HermesMemoryService();
 service.HermesMemoryService = HermesMemoryService;
+service.isMemoryStoreAvailable = isMemoryStoreAvailable;
 service.FEEDBACK_RATINGS = FEEDBACK_RATINGS;
 service.ACTION_STATUSES = ACTION_STATUSES;
 service.EVALUATION_WINDOWS = EVALUATION_WINDOWS;

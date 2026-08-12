@@ -4,7 +4,11 @@ const hermesMemoryService = require('../services/hermesMemoryService');
 const { wrapHandlers } = require('../utils/asyncHandler');
 
 async function getStatus(req, res) {
-  return res.json(hermesAgentService.getStatus());
+  const status = hermesAgentService.getStatus();
+  return res.json({
+    ...status,
+    memory: { available: hermesMemoryService.isMemoryStoreAvailable() },
+  });
 }
 
 async function chat(req, res) {
