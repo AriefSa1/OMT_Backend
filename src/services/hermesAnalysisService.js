@@ -1,6 +1,26 @@
 const prisma = require('../utils/prisma');
 const shopeeService = require('./shopeeService');
 const hermesAgentService = require('./hermesAgentService');
+const hermesCanonicalDataService = require('./hermesCanonicalDataService');
+const hermesOutputValidator = require('./hermesOutputValidator');
+const hermesMemoryService = require('./hermesMemoryService');
+const { sanitizeForHermes } = require('./hermesPayloadSanitizer');
+const { getSkill } = require('./hermesSkillRegistry');
+const { reviewContext } = require('./hermesDecisionReviewer');
+
+const HERMES_PROMPT_VERSION = '1.1.0';
+const HERMES_OUTPUT_SCHEMA_VERSION = '1.0';
+
+function addRecommendationMetadata(analysis) {
+  return {
+    ...analysis,
+    schemaVersion: analysis.schemaVersion || HERMES_OUTPUT_SCHEMA_VERSION,
+    prioritizedActions: (analysis.prioritizedActions || []).map((action, index) => ({
+      ...action,
+      recommendationId: action.recommendationId || `rec-${index + 1}`,
+    })),
+  };
+}
 
 const DEFAULT_ANALYSIS_DAYS = 30;
 const MAX_ANALYSIS_DAYS = 90;
@@ -340,6 +360,7 @@ function buildBlockedContext(intent, period) {
   };
   const quality = buildQuality({
     intent,
+    skill: getSkill(intent),
     range: period,
     session: null,
     sources: [unavailableSource],
@@ -382,7 +403,7 @@ class HermesAnalysisService {
     return session;
   }
 
-  async buildContext({ intent, prompt, user, storeId, startDate, endDate, days } = {}) {
+  async buildContext({ intent, prompt, user, storeId, startDate, endDate, days, sourceMode = 'LIVE_CANONICAL' } = {}) {
     const normalizedIntent = normalizeIntent(intent || prompt);
     if (!normalizedIntent) {
       return {
@@ -397,6 +418,50 @@ class HermesAnalysisService {
     const session = await this.resolveSession(user, storeId);
     if (!session) return buildBlockedContext(normalizedIntent, period);
     const targetStoreId = session?.storeId || null;
+    const learning = await hermesMemoryService.getLearningContext({
+      userId: user?.id,
+      storeId: targetStoreId,
+      intent: normalizedIntent,
+    }).catch(() => ({
+      memoryCount: 0,
+      feedback: [],
+      outcomes: [],
+      note: 'Memori analisa belum dapat dibaca; jangan menyimpulkan pembelajaran historis.',
+    }));
+
+    if (sourceMode === 'LIVE_CANONICAL') {
+      const canonical = await hermesCanonicalDataService.load({
+        intent: normalizedIntent,
+        range: period,
+        storeId: targetStoreId,
+      });
+      if (!canonical.success) {
+        return {
+          ...canonical,
+          intent: normalizedIntent,
+          period,
+          quality: {
+            ...canonical.quality,
+            sessionStoreId: targetStoreId,
+          },
+        };
+      }
+      return {
+        ...canonical,
+        intent: normalizedIntent,
+        period,
+        skill: getSkill(normalizedIntent),
+        promptVersion: HERMES_PROMPT_VERSION,
+        learning,
+        dataGaps: canonical.quality.dataGaps,
+        blockedClaims: [...new Set([...(canonical.blockedClaims || []), ...canonical.quality.dataGaps])],
+        quality: {
+          ...canonical.quality,
+          sessionStoreId: targetStoreId,
+        },
+      };
+    }
+
     const where = targetStoreId ? { storeId: targetStoreId, date: { gte: period.startDate, lte: period.endDate } } : { id: '__missing__' };
 
     if (normalizedIntent === INTENTS.ADS) {
@@ -584,6 +649,8 @@ class HermesAnalysisService {
     return {
       success: true,
       intent,
+      skill: getSkill(intent),
+      promptVersion: HERMES_PROMPT_VERSION,
       period,
       quality,
       trustedMetrics,
@@ -596,14 +663,24 @@ class HermesAnalysisService {
   }
 
   buildMessages(context) {
+    const skillInstructions = context.skill?.instructions?.join(' ') || 'Gunakan hanya data trusted dan evidence ledger.';
+    const safeContext = sanitizeForHermes(context);
     return [
       {
         role: 'system',
-        content: `Anda adalah analis bisnis yang kritis dan berbasis bukti. Analisa intent ${context.intent} menggunakan HANYA data dalam TRUSTED_CONTEXT. Jangan membuat angka, jangan mengubah angka trusted, jangan mengubah null menjadi 0, dan jangan menyimpulkan metrik yang tercantum di blockedClaims. Jika quality.status LIMITED, hasil harus menyatakan keterbatasan dan tidak boleh membuat klaim kausal, forecast, profit, atau tren yang tidak didukung. Balas JSON valid saja dengan bentuk: {"executiveVerdict":"string","criticalFindings":[{"severity":"HIGH|MEDIUM|LOW","title":"string","description":"string","evidence":[{"metric":"string","value":null,"unit":"string","period":"string"}],"impact":"string","confidence":"HIGH|MEDIUM|LOW"}],"rootCauseAnalysis":[{"hypothesis":"string","supportingEvidence":["string"],"confidence":"HIGH|MEDIUM|LOW"}],"prioritizedActions":[{"priority":1,"action":"string","reason":"string","expectedMeasurement":"string"}],"dataGaps":["string"]}. Setiap angka harus dapat ditelusuri ke trustedMetrics atau details.`,
+        content: `Anda adalah partner analis bisnis yang kritis dan berbasis bukti. Skill aktif: ${context.skill?.label || context.intent} (${context.skill?.version || 'unknown'}). Instruksi skill: ${skillInstructions} Analisa intent ${context.intent} menggunakan HANYA TRUSTED_CONTEXT. Bedakan fakta, interpretasi, hipotesis, dan tindakan. Jangan membuat angka, jangan mengubah angka trusted, jangan mengubah null menjadi 0, dan jangan menyimpulkan metrik yang tercantum di blockedClaims. Jika quality.status bukan SAFE, jangan membuat analisa bisnis. Setiap temuan, hipotesis, dan tindakan wajib menunjuk evidenceIds yang ada di evidence ledger. Nilai numerik terstruktur hanya boleh memakai nilai yang ada di evidence atau trustedMetrics. Untuk hipotesis, jelaskan howToTest. Untuk tindakan, berikan baseline/target hanya jika nilainya ada di evidence, serta expectedMeasurement yang dapat diuji. Gunakan schemaVersion=\"1.0\" dan balas JSON valid saja dengan bentuk: {\"schemaVersion\":\"1.0\",\"executiveVerdict\":\"string\",\"criticalFindings\":[{\"severity\":\"HIGH|MEDIUM|LOW\",\"title\":\"string\",\"description\":\"string\",\"evidenceIds\":[\"ev_id\"],\"impact\":{\"metric\":\"string\",\"value\":null,\"unit\":\"string\"},\"confidence\":\"HIGH|MEDIUM|LOW\"}],\"rootCauseAnalysis\":[{\"hypothesis\":\"string\",\"supportingEvidenceIds\":[\"ev_id\"],\"howToTest\":\"string\",\"confidence\":\"HIGH|MEDIUM|LOW\"}],\"prioritizedActions\":[{\"priority\":1,\"action\":\"string\",\"reason\":\"string\",\"evidenceIds\":[\"ev_id\"],\"baseline\":{\"metric\":\"string\",\"value\":null,\"unit\":\"string\"},\"target\":{\"metric\":\"string\",\"value\":null,\"unit\":\"string\"},\"expectedMeasurement\":\"string\"}],\"dataGaps\":[\"string\"],\"uncertainty\":[\"string\"]}.`,
+      },
+      {
+        role: 'system',
+        content: `Learning loop contract versi ${HERMES_PROMPT_VERSION}: jika tindakan memiliki metricKey dan baseline/target numerik yang ada di trusted evidence, tambahkan windowDays bernilai 7 atau 30. Gunakan hanya metricKey yang tersedia untuk intent ini. Jika tidak ada angka tervalidasi, jangan mengarangnya; tindakan akan dicatat sebagai unmeasured. Outcome historis hanya sinyal pembelajaran dan tidak boleh diperlakukan sebagai bukti kausal.`,
+      },
+      {
+        role: 'system',
+        content: 'Setiap prioritizedAction boleh menyertakan metricKey dan windowDays. Gunakan metricKey yang sama dengan baseline.metric/target.metric dan hanya angka/unit yang ada pada evidence; jika tidak dapat dibuktikan, gunakan null dan jangan mengarang.',
       },
       {
         role: 'user',
-        content: `TRUSTED_CONTEXT:\n${JSON.stringify(context)}`,
+        content: `TRUSTED_CONTEXT:\n${JSON.stringify(safeContext)}`,
       },
     ];
   }
@@ -621,6 +698,13 @@ class HermesAnalysisService {
         trustedMetrics: context.trustedMetrics,
         comparisons: context.comparisons,
         details: context.details,
+        evidence: context.evidence || [],
+        effectivePeriod: context.effectivePeriod || null,
+        sourceMode: context.sourceMode || context.quality?.sourceMode || 'SNAPSHOT',
+        reconciliation: context.quality?.reconciliation || { status: 'NOT_EVALUATED', fields: {} },
+        skill: context.skill || null,
+        promptVersion: context.promptVersion || HERMES_PROMPT_VERSION,
+        learning: context.learning || null,
       },
       allowedClaims: context.allowedClaims,
       blockedClaims: context.blockedClaims,
@@ -645,6 +729,22 @@ class HermesAnalysisService {
       };
     }
 
+    const reviewer = reviewContext(context);
+    if (!reviewer.pass) {
+      return {
+        success: false,
+        provider: 'HERMES_AGENT',
+        errorCode: 'CONTEXT_REVIEW_BLOCKED',
+        intent: context.intent,
+        period: context.period,
+        quality: context.quality,
+        review: reviewer,
+        dataGaps: context.dataGaps,
+        message: 'Konteks belum lolos critical reviewer sebelum dikirim ke Hermes.',
+        statusCode: 422,
+      };
+    }
+
     const result = await hermesAgentService.chat({
       messages: this.buildMessages(context),
       temperature: 0.2,
@@ -656,11 +756,8 @@ class HermesAnalysisService {
     }
 
     const content = result.response?.choices?.[0]?.message?.content;
-    let analysis;
-    try {
-      const cleaned = String(content || '').replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-      analysis = JSON.parse(cleaned);
-    } catch {
+    const validatedOutput = hermesOutputValidator.parseAndValidate(content, context);
+    if (!validatedOutput.valid) {
       return {
         success: false,
         provider: 'HERMES_AGENT',
@@ -668,10 +765,27 @@ class HermesAnalysisService {
         intent: context.intent,
         period: context.period,
         quality: context.quality,
-        message: 'Hermes mengembalikan hasil yang bukan JSON valid untuk kontrak analisa.',
+        review: reviewer,
+        validationErrors: validatedOutput.errors,
+        validationWarnings: validatedOutput.warnings,
+        message: validatedOutput.errorCode === 'INVALID_JSON'
+          ? 'Hermes mengembalikan hasil yang bukan JSON valid untuk kontrak analisa.'
+          : 'Hermes mengembalikan JSON, tetapi tidak memenuhi kontrak evidence analisa.',
         statusCode: 502,
       };
     }
+
+    const analysis = addRecommendationMetadata(validatedOutput.analysis);
+    const normalizedResult = { ...result, analysis };
+    const memory = await hermesMemoryService.persistAnalysis({
+      userId: args.user?.id,
+      storeId: context.quality?.sessionStoreId,
+      context,
+      result: normalizedResult,
+    }).catch((error) => {
+      console.warn('[Hermes] Memori analisa tidak tersimpan; hasil utama tetap dikembalikan:', error.message);
+      return null;
+    });
 
     return {
       success: true,
@@ -681,7 +795,16 @@ class HermesAnalysisService {
       period: context.period,
       quality: context.quality,
       analysis,
+      skill: context.skill,
+      review: reviewer,
+      evidence: context.evidence || [],
+      effectivePeriod: context.effectivePeriod || null,
+      validationWarnings: validatedOutput.warnings,
       dataGaps: context.dataGaps,
+      memoryId: memory?.id || null,
+      memoryPersisted: Boolean(memory),
+      promptVersion: context.promptVersion || HERMES_PROMPT_VERSION,
+      outputSchemaVersion: HERMES_OUTPUT_SCHEMA_VERSION,
     };
   }
 }

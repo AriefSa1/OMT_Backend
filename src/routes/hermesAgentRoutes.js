@@ -1,6 +1,17 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
-const { getStatus, chat, validateAnalysis, analyze } = require('../controllers/hermesAgentController');
+const {
+  getStatus,
+  chat,
+  validateAnalysis,
+  analyze,
+  listMemories,
+  getMemory,
+  saveFeedback,
+  createAction,
+  updateAction,
+  evaluateAction,
+} = require('../controllers/hermesAgentController');
 
 const router = express.Router();
 
@@ -10,5 +21,11 @@ router.get('/status', getStatus);
 router.post('/chat', chat);
 router.post('/analyze/validate', validateAnalysis);
 router.post('/analyze', analyze);
+router.get('/memories', listMemories);
+router.get('/memories/:id', getMemory);
+router.post('/analyze/:id/feedback', saveFeedback);
+router.post('/analyze/:id/actions', createAction);
+router.patch('/actions/:id', updateAction);
+router.post('/actions/:id/evaluate', evaluateAction);
 
 module.exports = router;

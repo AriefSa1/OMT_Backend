@@ -4,6 +4,10 @@ const DEFAULT_BASE_URL = 'http://127.0.0.1:8642/v1';
 const DEFAULT_MODEL = 'hermes-agent';
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_MESSAGES = 100;
+const CHAT_MODES = Object.freeze({
+  EXPLORATORY: 'EXPLORATORY',
+  GROUNDED_ANALYSIS: 'GROUNDED_ANALYSIS',
+});
 
 function cleanBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -87,7 +91,7 @@ class HermesAgentService {
     };
   }
 
-  async chat({ messages, model, temperature, maxTokens, conversation, previousResponseId, responseFormat } = {}) {
+  async chat({ messages, model, temperature, maxTokens, conversation, previousResponseId, responseFormat, mode = CHAT_MODES.EXPLORATORY } = {}) {
     const validationError = validateMessages(messages);
     if (validationError) {
       return {
@@ -107,6 +111,17 @@ class HermesAgentService {
         model: this.defaultModel,
         message: 'Hermes Agent belum dikonfigurasi. Isi HERMES_AGENT_ENABLED, HERMES_AGENT_API_KEY, dan URL Hermes lokal.',
         statusCode: 503,
+      };
+    }
+
+    const normalizedMode = String(mode || CHAT_MODES.EXPLORATORY).toUpperCase();
+    if (!Object.values(CHAT_MODES).includes(normalizedMode)) {
+      return {
+        success: false,
+        provider: 'HERMES_AGENT',
+        errorCode: 'MISSING_INPUT',
+        message: `Mode chat tidak dikenal. Gunakan ${Object.values(CHAT_MODES).join(' atau ')}.`,
+        statusCode: 400,
       };
     }
 
@@ -140,6 +155,8 @@ class HermesAgentService {
         return {
           success: false,
           provider: 'HERMES_AGENT',
+          mode: normalizedMode,
+          grounding: normalizedMode === CHAT_MODES.GROUNDED_ANALYSIS ? 'CANONICAL_DATA_REQUIRED' : 'UNVERIFIED_EXPLORATORY',
           errorCode: 'INVALID_RESPONSE',
           model: payload.model,
           message: 'Hermes Agent mengembalikan format response yang tidak dikenali.',
@@ -150,6 +167,8 @@ class HermesAgentService {
       return {
         success: true,
         provider: 'HERMES_AGENT',
+        mode: normalizedMode,
+        grounding: normalizedMode === CHAT_MODES.GROUNDED_ANALYSIS ? 'CANONICAL_DATA_REQUIRED' : 'UNVERIFIED_EXPLORATORY',
         model: data.model || payload.model,
         response: data,
       };
@@ -159,6 +178,8 @@ class HermesAgentService {
       return {
         success: false,
         provider: 'HERMES_AGENT',
+        mode: normalizedMode,
+        grounding: normalizedMode === CHAT_MODES.GROUNDED_ANALYSIS ? 'CANONICAL_DATA_REQUIRED' : 'UNVERIFIED_EXPLORATORY',
         errorCode: classified.code,
         model: payload.model,
         message: classified.message,

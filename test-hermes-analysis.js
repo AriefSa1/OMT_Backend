@@ -56,10 +56,10 @@ async function main() {
     return { success: true };
   };
   try {
-    const validation = await service.validate({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' } });
+    const validation = await service.validate({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' }, sourceMode: 'SNAPSHOT' });
     check('missing authorized session becomes BLOCKED', validation.quality?.status === 'BLOCKED');
     check('BLOCKED context cannot call Hermes', validation.canCallHermes === false);
-    const analysis = await service.analyze({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' } });
+    const analysis = await service.analyze({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' }, sourceMode: 'SNAPSHOT' });
     check('analysis returns DATA_BLOCKED', analysis.errorCode === 'DATA_BLOCKED');
     check('no upstream Hermes call was made', upstreamCalls === 0);
   } finally {
@@ -86,7 +86,7 @@ async function main() {
     ];
   };
   try {
-    const validation = await serviceWithData.validate({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' } });
+    const validation = await serviceWithData.validate({ intent: 'Iklan', user: { id: 'user-test', role: 'USER' }, sourceMode: 'SNAPSHOT' });
     check('authorized context keeps the default period at 30 days', validation.period?.days === 30);
     check('authorized context remains blocked while coverage is incomplete', validation.canCallHermes === false);
     check('trusted ROAS is exposed from backend arithmetic', validation.trustedContextPreview?.trustedMetrics?.roas?.value === 2.5);

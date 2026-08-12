@@ -425,8 +425,13 @@ Body minimal:
 }
 ```
 
-Field opsional yang diteruskan: `model`, `temperature`, `maxTokens`, `conversation`, dan
-`previousResponseId`. Streaming sengaja belum diaktifkan pada tahap eksperimen awal.
+Field opsional yang diteruskan: `model`, `temperature`, `maxTokens`, `conversation`,
+`previousResponseId`, dan `mode`. `mode` defaultnya `EXPLORATORY` dan response diberi
+label `grounding: UNVERIFIED_EXPLORATORY`; mode ini tidak membawa data dashboard dan tidak
+boleh dianggap sebagai analisa bisnis. `GROUNDED_ANALYSIS` hanya merupakan label kontrak;
+jalur analisa bisnis yang benar tetap `POST /api/hermes/analyze` karena endpoint tersebut
+memasang sumber kanonik, evidence ledger, rekonsiliasi, dan validator output. Streaming
+sengaja belum diaktifkan pada tahap eksperimen awal.
 
 Response sukses membungkus response asli Hermes di field `response`:
 
@@ -434,6 +439,8 @@ Response sukses membungkus response asli Hermes di field `response`:
 {
   "success": true,
   "provider": "HERMES_AGENT",
+  "mode": "EXPLORATORY",
+  "grounding": "UNVERIFIED_EXPLORATORY",
   "model": "hermes-agent",
   "response": { "id": "...", "choices": [] }
 }
@@ -463,6 +470,18 @@ Body opsional:
 }
 ```
 
+Secara default endpoint memakai adapter live kanonik (`sourceMode: LIVE_CANONICAL` secara
+internal), bukan snapshot database lama. Adapter yang dipakai adalah:
+
+- `IKLAN` → response live Shopee Ads;
+- `PERFORMA_TOKO` → `Product Overview` dengan field `confirmed_*`;
+- `PERFORMA_PRODUK` → `Product Performance` seluruh halaman, direkonsiliasi terhadap
+  `Product Overview confirmed` untuk GMV dan unit.
+
+Snapshot lokal hanya dipakai oleh regression test dan diagnostik internal. Jika sumber live
+tidak tersedia atau rekonsiliasi core mismatch, status menjadi `BLOCKED` dan tidak ada
+request yang diteruskan ke Hermes.
+
 Hasil validasi memiliki `quality.status` berikut:
 
 - `SAFE`: sumber utama memenuhi coverage dan freshness minimum; konteks boleh dianalisa
@@ -489,7 +508,77 @@ ketika status kualitas `BLOCKED`, sehingga data tidak pernah dikirim ke agent da
 tersebut. Status `LIMITED` juga tidak diteruskan ke Hermes; hanya status `SAFE` yang boleh
 memanggil agent. Body intent dan rentang tanggal sama dengan endpoint validasi.
 
-Response sukses mengembalikan `quality`, `period`, `dataGaps`, dan `analysis` JSON yang
-berisi `executiveVerdict`, `criticalFindings`, `rootCauseAnalysis`, dan
-`prioritizedActions`. Angka aritmetika seperti ROAS, CTR, AOV, dan conversion rate dihitung
-di backend dari field sumber; Hermes hanya menafsirkan angka trusted tersebut.
+Response sukses mengembalikan `quality`, `period`, `effectivePeriod`, `evidence`,
+`validationWarnings`, dan `analysis` JSON. Output wajib memakai `schemaVersion: "1.0"`:
+
+- setiap finding menunjuk `evidenceIds`;
+- setiap hipotesis menunjuk `supportingEvidenceIds` dan `howToTest`;
+- setiap tindakan menunjuk evidence serta `expectedMeasurement`;
+- nilai numerik terstruktur harus ada pada evidence ledger atau trusted metrics.
+
+Output JSON yang tidak memenuhi kontrak evidence ditolak sebagai `INVALID_RESPONSE`. Angka
+aritmetika seperti ROAS, CTR, AOV, dan conversion rate dihitung di backend dari field sumber;
+Hermes hanya menafsirkan angka trusted tersebut.
+
+Payload `TRUSTED_CONTEXT` yang dikirim ke agent melewati sanitizer recursive: key credential,
+cookie, token, secret, password, dan authorization direduksi menjadi `[REDACTED]`, sedangkan
+string, array, object, dan kedalaman konteks dibatasi agar feedback atau detail sumber tidak
+menggelembungkan request. Jika source live tidak memberi `dataAsOf`, field tersebut tetap
+`null`; `retrievedAt` tidak boleh dibaca sebagai waktu data dan `freshnessStatus` akan bernilai
+`UNKNOWN`.
+
+### Skill dan reviewer Hermes
+
+Intent memilih skill versioned secara deterministik:
+
+- `IKLAN` → `ads-performance-analyst`;
+- `PERFORMA_TOKO` → `store-funnel-analyst`;
+- `PERFORMA_PRODUK` → `product-portfolio-analyst`.
+
+Sebelum konteks dikirim, `critical reviewer` memeriksa status `SAFE`, keberadaan evidence,
+dan untuk Performa Produk status rekonsiliasi `MATCH`. Skill tidak boleh mengubah angka
+sumber; skill hanya menentukan aturan interpretasi, klaim terlarang, dan bentuk tindakan
+yang perlu diuji.
+
+### Memori, feedback, dan outcome tracking
+
+Setiap response sukses dari `POST /api/hermes/analyze` mencoba menyimpan memori audit
+secara fail-soft. Field `memoryId` dan `memoryPersisted` menunjukkan apakah snapshot
+konteks, evidence ledger, dan output analisa berhasil disimpan. Kegagalan penyimpanan
+memori tidak menggagalkan hasil analisa utama.
+
+- `GET /api/hermes/memories` mengembalikan memori milik user, termasuk feedback,
+  tindakan, dan slot evaluasi.
+- `GET /api/hermes/memories/:id` mengembalikan satu memori lengkap. Query selalu dibatasi
+  oleh `userId`; user tidak dapat membaca memori user lain.
+- `POST /api/hermes/analyze/:id/feedback` menerima `rating` bernilai `HELPFUL`,
+  `PARTIALLY_HELPFUL`, `NOT_HELPFUL`, atau `INACCURATE`, dan `comment` opsional. Feedback
+  bersifat upsert sehingga satu user dapat memperbaiki sinyalnya.
+- `POST /api/hermes/analyze/:id/actions` menerima `recommendationIndex` dan menyalin
+  rekomendasi yang sudah tervalidasi dari memori. Client tidak dapat mengganti teks
+  rekomendasi atau baseline secara sepihak.
+- `PATCH /api/hermes/actions/:id` menerima status `PLANNED`, `IN_PROGRESS`, `COMPLETED`,
+  `SKIPPED`, atau `CANCELLED`. Saat tindakan ditandai `COMPLETED`, server membuat slot
+  evaluasi 7 dan 30 hari.
+- `POST /api/hermes/actions/:id/evaluate` menerima `windowDays: 7` atau `30`. Sebelum
+  jendela waktunya tercapai, response berstatus `NOT_READY`. Setelahnya server membaca
+  adapter live kanonik; bila metric key, baseline, atau sumber tidak valid, hasilnya
+  `INSUFFICIENT_DATA`, bukan angka pengganti.
+
+Rekomendasi hanya dapat menjadi outcome terukur jika output Hermes menyertakan `metricKey`
+yang terdaftar untuk intent tersebut, unit yang cocok, baseline numerik yang ada di evidence,
+serta `windowDays` 7 atau 30. Setiap rekomendasi mendapat `recommendationId` stabil seperti
+`rec-1`, dan memory menyimpan `promptVersion` serta `outputSchemaVersion` untuk audit.
+
+Feedback dapat menyertakan `reasons`, misalnya `DATA_MISMATCH`, `ANALYSIS_TOO_GENERAL`,
+`RECOMMENDATION_NOT_EXECUTABLE`, `NUMBERS_CORRECT_INTERPRETATION_WRONG`,
+`INSUFFICIENT_DATA`, `ACTION_WORKED`, atau `OUTCOME_NOT_IMPROVED`.
+
+Evaluasi menyimpan `baselineValue`, `targetValue`, `actualValue`, `deltaValue`, verdict,
+evidence, periode efektif, dan `periodStatus`. `periodStatus` membedakan `EXACT`,
+`NATIVE_PERIOD`, `PERIOD_MISMATCH`, `SOURCE_BLOCKED`, dan `NOT_CHECKED`. Pada
+`NATIVE_PERIOD` hanya valid jika periode tindakan tepat sama dengan rolling window 7/30 hari
+saat evaluasi dijalankan. `PERIOD_MISMATCH` tidak memaksakan verdict. Verdict yang tersedia tetap merupakan
+perbandingan terhadap baseline, bukan klaim bahwa tindakan tersebut menyebabkan perubahan.
+Outcome terukur dan feedback yang sudah tersimpan dibaca sebagai sinyal pembelajaran pada
+analisa berikutnya, dengan batasan tersebut tetap dibawa ke prompt.

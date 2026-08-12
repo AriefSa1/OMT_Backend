@@ -160,7 +160,7 @@ async function fetchStoredRange(range, session) {
   const result = {};
   for (const intent of ['IKLAN', 'PERFORMA_TOKO', 'PERFORMA_PRODUK']) {
     const validation = await hermesAnalysisService.validate({
-      intent, user: { id: session.userId, role: 'USER' }, storeId: session.storeId,
+      intent, user: { id: session.userId, role: 'USER' }, sourceMode: 'SNAPSHOT', storeId: session.storeId,
       startDate, endDate,
     });
     result[intent] = {

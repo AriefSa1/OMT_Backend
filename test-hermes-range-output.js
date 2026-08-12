@@ -129,6 +129,7 @@ async function main() {
       const result = await hermesAnalysisService.validate({
         intent,
         user,
+        sourceMode: 'SNAPSHOT',
         storeId: session.storeId,
         ...range.args,
       });

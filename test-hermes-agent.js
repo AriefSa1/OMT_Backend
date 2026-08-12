@@ -49,6 +49,19 @@ async function main() {
     check('uses the dedicated chat completions endpoint', request.url === 'http://127.0.0.1:8642/v1/chat/completions');
     check('sends bearer authentication without exposing it in the response', request.config.headers.Authorization === 'Bearer test-hermes-key' && !JSON.stringify(success).includes('test-hermes-key'));
     check('forwards messages and disables streaming for this first route', request.body.messages[0].content === 'Halo' && request.body.stream === false);
+    check('labels exploratory chat as unverified', success.mode === 'EXPLORATORY' && success.grounding === 'UNVERIFIED_EXPLORATORY');
+
+    const grounded = await hermesAgentService.chat({
+      messages: [{ role: 'user', content: 'Analisa data' }],
+      mode: 'GROUNDED_ANALYSIS',
+    });
+    check('supports an explicit grounded mode label', grounded.mode === 'GROUNDED_ANALYSIS' && grounded.grounding === 'CANONICAL_DATA_REQUIRED');
+
+    const invalidMode = await hermesAgentService.chat({
+      messages: [{ role: 'user', content: 'Tes' }],
+      mode: 'UNKNOWN',
+    });
+    check('rejects unknown chat mode', invalidMode.success === false && invalidMode.errorCode === 'MISSING_INPUT');
 
     console.log('\n2. Invalid input must not call Hermes');
     let invalidCalls = 0;
