@@ -1736,12 +1736,27 @@ class ShopeeService {
       const aggregationTotalPages = Math.ceil(totalCount / aggregationPageSize);
       const canReuseFirstPage = Number(pageNum) === 1 && Number(pageSize) >= aggregationPageSize;
       if (aggregationTotalPages > 1 || !canReuseFirstPage) {
+        // Seller Center rate-limits aggressive parallelism. Fan the page reads out through
+        // a bounded worker pool (cursor + N workers) instead of firing every page at once,
+        // so a large catalog does not trigger a burst of concurrent requests per load.
+        const concurrency = Math.max(1, Number(process.env.SHOPEE_PRODUCT_PERFORMANCE_CONCURRENCY) || 4);
         const pageNumbers = Array.from({ length: aggregationTotalPages || 1 }, (_, index) => index + 1);
-        const pageResults = await Promise.all(pageNumbers.map(async (requestedPageNum) => {
-          if (canReuseFirstPage && requestedPageNum === 1) return firstPage.rawList;
-          const page = await fetchRawPage(aggregationPageSize, requestedPageNum);
-          return page.rawList;
-        }));
+        const pageResults = new Array(pageNumbers.length);
+        let cursor = 0;
+        const worker = async () => {
+          while (cursor < pageNumbers.length) {
+            const index = cursor;
+            const requestedPageNum = pageNumbers[index];
+            cursor += 1;
+            if (canReuseFirstPage && requestedPageNum === 1) {
+              pageResults[index] = firstPage.rawList;
+              continue;
+            }
+            const page = await fetchRawPage(aggregationPageSize, requestedPageNum);
+            pageResults[index] = page.rawList;
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(concurrency, pageNumbers.length) }, worker));
         aggregationRows = pageResults.flat();
       }
 
