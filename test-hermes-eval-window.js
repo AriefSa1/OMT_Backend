@@ -30,6 +30,8 @@ function shiftDateKey(value, days) {
 }
 
 // ---- Mocks ------------------------------------------------------------------
+// Availability probe: pretend the Hermes tables exist so evaluateAction runs offline.
+prisma.hermesAnalysisMemory.count = async () => 0;
 let evaluationRow = null;
 prisma.hermesRecommendationEvaluation.findUnique = async () => evaluationRow;
 prisma.hermesRecommendationEvaluation.upsert = async ({ create, update }) => {

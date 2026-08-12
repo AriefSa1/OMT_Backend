@@ -7,7 +7,7 @@ async function getStatus(req, res) {
   const status = hermesAgentService.getStatus();
   return res.json({
     ...status,
-    memory: { available: hermesMemoryService.isMemoryStoreAvailable() },
+    memory: { available: await hermesMemoryService.isMemoryStoreAvailable() },
   });
 }
 

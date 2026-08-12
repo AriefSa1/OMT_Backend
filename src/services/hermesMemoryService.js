@@ -15,12 +15,39 @@ const FEEDBACK_REASONS = new Set([
 const ACTION_STATUSES = new Set(['PLANNED', 'IN_PROGRESS', 'COMPLETED', 'SKIPPED', 'CANCELLED']);
 const EVALUATION_WINDOWS = new Set([7, 30]);
 
-// Memori tersedia jika Prisma Client memang memiliki model Hermes (sudah di-generate
-// dari schema ini). Ini capability check yang akurat — bukan menebak dari string
-// DATABASE_URL — sehingga tetap benar untuk koneksi Postgres langsung maupun Accelerate
-// (prisma://), dan menonaktifkan learning loop secara bersih bila migrasi belum dijalankan.
-function isMemoryStoreAvailable() {
+// Ketersediaan memori butuh DUA syarat: (1) Prisma Client punya model Hermes (sudah
+// di-generate), DAN (2) tabelnya benar-benar ada di DB. Keduanya bisa berbeda — client
+// ter-generate tapi `prisma db push` belum dijalankan → model ada, tabel tidak — sehingga
+// query melempar P2021 saat runtime. Kita probe sekali lalu cache hasilnya agar tidak
+// menyemburkan error berulang; hasil `true` di-cache permanen, `false` karena tabel hilang
+// juga di-cache (di-reset saat proses restart, mis. setelah deploy yang menjalankan push).
+let memoryStoreProbe = null; // null = belum diprobe, boolean = hasil diketahui
+
+function memoryModelPresent() {
   return Boolean(prisma && prisma.hermesAnalysisMemory);
+}
+
+function isMissingTableError(error) {
+  if (!error) return false;
+  if (error.code === 'P2021') return true;
+  const message = String(error.message || '');
+  return /does not exist in the current database/i.test(message) || /relation .* does not exist/i.test(message);
+}
+
+async function isMemoryStoreAvailable() {
+  if (!memoryModelPresent()) return false;
+  if (memoryStoreProbe !== null) return memoryStoreProbe;
+  try {
+    await prisma.hermesAnalysisMemory.count();
+    memoryStoreProbe = true;
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      memoryStoreProbe = false; // tabel belum dibuat — nonaktifkan learning loop dengan bersih
+    } else {
+      return false; // gangguan sementara (mis. koneksi) — jangan cache, coba lagi nanti
+    }
+  }
+  return memoryStoreProbe;
 }
 
 function finiteNumber(value) {
@@ -209,7 +236,7 @@ function publicAction(action) {
 
 class HermesMemoryService {
   async persistAnalysis({ userId, storeId, context, result }) {
-    if (!isMemoryStoreAvailable() || !userId || !storeId || !context?.period || !result?.analysis) return null;
+    if (!(await isMemoryStoreAvailable()) || !userId || !storeId || !context?.period || !result?.analysis) return null;
     return prisma.hermesAnalysisMemory.create({
       data: {
         userId: String(userId),
@@ -244,7 +271,7 @@ class HermesMemoryService {
   }
 
   async listMemories({ userId, storeId, intent, limit = 20 } = {}) {
-    if (!isMemoryStoreAvailable() || !userId) return [];
+    if (!(await isMemoryStoreAvailable()) || !userId) return [];
     const where = { userId: String(userId) };
     if (storeId) where.storeId = String(storeId);
     if (intent) where.intent = String(intent);
@@ -277,7 +304,7 @@ class HermesMemoryService {
   }
 
   async getMemory({ userId, id } = {}) {
-    if (!isMemoryStoreAvailable() || !userId || !id) return null;
+    if (!(await isMemoryStoreAvailable()) || !userId || !id) return null;
     let row;
     try {
       row = await prisma.hermesAnalysisMemory.findFirst({
@@ -309,7 +336,7 @@ class HermesMemoryService {
   }
 
   async saveFeedback({ userId, analysisId, rating, reasons = [], comment = null }) {
-    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; feedback tidak dapat disimpan.' };
+    if (!(await isMemoryStoreAvailable())) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; feedback tidak dapat disimpan.' };
     const normalized = String(rating || '').toUpperCase();
     if (!FEEDBACK_RATINGS.has(normalized)) return { success: false, errorCode: 'INVALID_FEEDBACK', message: 'Rating feedback tidak dikenali.' };
     const normalizedReasons = [...new Set((Array.isArray(reasons) ? reasons : [reasons])
@@ -326,7 +353,7 @@ class HermesMemoryService {
   }
 
   async createAction({ userId, analysisId, recommendationIndex }) {
-    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; tindakan tidak dapat dicatat.' };
+    if (!(await isMemoryStoreAvailable())) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; tindakan tidak dapat dicatat.' };
     const memory = await prisma.hermesAnalysisMemory.findFirst({ where: { id: String(analysisId), userId: String(userId) } });
     if (!memory) return { success: false, errorCode: 'MEMORY_NOT_FOUND', message: 'Memori analisa tidak ditemukan untuk pengguna ini.' };
     const analysis = parseJson(memory.analysisJson, {});
@@ -345,7 +372,7 @@ class HermesMemoryService {
   }
 
   async updateAction({ userId, actionId, status, notes }) {
-    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; status tindakan tidak dapat diperbarui.' };
+    if (!(await isMemoryStoreAvailable())) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; status tindakan tidak dapat diperbarui.' };
     const normalized = String(status || '').toUpperCase();
     if (!ACTION_STATUSES.has(normalized)) return { success: false, errorCode: 'INVALID_ACTION_STATUS', message: 'Status tindakan tidak dikenali.' };
     const current = await prisma.hermesRecommendationAction.findFirst({ where: { id: String(actionId), userId: String(userId) } });
@@ -372,7 +399,7 @@ class HermesMemoryService {
   }
 
   async evaluateAction({ userId, actionId, windowDays }) {
-    if (!isMemoryStoreAvailable()) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; evaluasi tidak dapat dijalankan.' };
+    if (!(await isMemoryStoreAvailable())) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; evaluasi tidak dapat dijalankan.' };
     const window = Number(windowDays);
     if (!EVALUATION_WINDOWS.has(window)) return { success: false, errorCode: 'INVALID_EVALUATION_WINDOW', message: 'Jendela evaluasi hanya 7 atau 30 hari.' };
     const action = await prisma.hermesRecommendationAction.findFirst({ where: { id: String(actionId), userId: String(userId) }, include: { analysis: true } });
@@ -473,7 +500,7 @@ class HermesMemoryService {
   }
 
   async getLearningContext({ userId, storeId, intent, limit = 10 } = {}) {
-    if (!isMemoryStoreAvailable() || !userId) return { memoryCount: 0, feedback: [], outcomes: [], note: 'Memori belum tersedia.' };
+    if (!(await isMemoryStoreAvailable()) || !userId) return { memoryCount: 0, feedback: [], outcomes: [], note: 'Memori belum tersedia.' };
     let rows;
     try {
       rows = await prisma.hermesAnalysisMemory.findMany({
