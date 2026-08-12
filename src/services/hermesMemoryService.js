@@ -382,14 +382,14 @@ class HermesMemoryService {
     // Eligibility berbasis hari kalender (bukan selisih milidetik persis). Sumber
     // kanonik live hanya menyajikan rolling window yang berakhir hari ini, jadi jendela
     // pasca-tindakan hanya sejajar pada satu hari: `tanggalSelesai + windowDays`. Dengan
-    // menggerbang pada hari kalender — bukan jam persis penyelesaian — sweep harian
-    // otomatis (atau pengguna) bisa menangkap outcome kapan pun pada hari yang sejajar itu.
+    // menggerbang pada hari kalender — bukan jam persis penyelesaian — pengguna punya
+    // satu hari penuh untuk memicu evaluasi saat periodenya masih sejajar.
     const eligibleDateKey = shiftDateKey(dateKey(action.completedAt), window);
     const todayKey = dateKey();
     if (todayKey < eligibleDateKey) {
       const requestedRange = postActionRange(action.completedAt, window);
       const remainingDays = Math.max(1, Math.round((Date.parse(`${eligibleDateKey}T00:00:00.000Z`) - Date.parse(`${todayKey}T00:00:00.000Z`)) / 86400000));
-      const note = `Belum waktunya: outcome ${window} hari akan diukur otomatis pada ${eligibleDateKey} (±${remainingDays} hari lagi).`;
+      const note = `Belum waktunya: outcome ${window} hari dapat dievaluasi mulai ${eligibleDateKey} (±${remainingDays} hari lagi).`;
       const updated = await prisma.hermesRecommendationEvaluation.upsert({
         where: { actionId_windowDays: { actionId: action.id, windowDays: window } },
         update: { status: 'NOT_READY', periodStatus: 'NOT_CHECKED', windowStartDate: requestedRange.startDate, windowEndDate: requestedRange.endDate, notes: note },
@@ -470,43 +470,6 @@ class HermesMemoryService {
       },
     });
     return { success: true, evaluation: publicEvaluation(evaluation), message: 'Outcome berhasil dievaluasi dari sumber kanonik.' };
-  }
-
-  // Sweep otomatis: menangkap outcome tindakan pada hari kalender di mana jendela
-  // pasca-tindakan sejajar dengan rolling window sumber kanonik live. Dipanggil sekali
-  // per hari oleh cron; hanya menyentuh evaluasi berstatus NOT_READY yang sudah jatuh
-  // tempo, jadi baris yang sudah EVALUATED/PERIOD_MISMATCH tidak diproses ulang.
-  async evaluateDueActions({ limit = 200 } = {}) {
-    if (!isMemoryStoreAvailable()) return { available: false, scanned: 0, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
-    const todayKey = dateKey();
-    let rows;
-    try {
-      rows = await prisma.hermesRecommendationEvaluation.findMany({
-        where: { status: 'NOT_READY' },
-        include: { action: true },
-        take: Math.min(Math.max(Number(limit) || 200, 1), 1000),
-      });
-    } catch {
-      return { available: false, scanned: 0, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
-    }
-    const summary = { available: true, scanned: rows.length, evaluated: 0, mismatched: 0, pending: 0, errored: 0 };
-    for (const row of rows) {
-      const completedAt = row.action?.completedAt;
-      if (!completedAt) { summary.pending += 1; continue; }
-      const eligibleDateKey = shiftDateKey(dateKey(completedAt), row.windowDays);
-      if (todayKey < eligibleDateKey) { summary.pending += 1; continue; }
-      try {
-        const result = await this.evaluateAction({ userId: row.userId, actionId: row.actionId, windowDays: row.windowDays });
-        const status = result?.evaluation?.status;
-        if (status === 'EVALUATED') summary.evaluated += 1;
-        else if (status === 'PERIOD_MISMATCH') summary.mismatched += 1;
-        else summary.pending += 1;
-      } catch (error) {
-        summary.errored += 1;
-        console.warn('[Hermes] evaluateDueActions gagal untuk evaluasi', row.id, error.message);
-      }
-    }
-    return summary;
   }
 
   async getLearningContext({ userId, storeId, intent, limit = 10 } = {}) {

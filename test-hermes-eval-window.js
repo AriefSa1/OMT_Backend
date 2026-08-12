@@ -80,17 +80,6 @@ async function main() {
   check('actual value comes from canonical source', due.evaluation?.actualValue === 150);
   check('verdict reflects target met (150 >= 120)', due.evaluation?.verdict === 'TARGET_MET');
 
-  // Case 3: evaluateDueActions skips not-yet-due rows, processes due ones.
-  prisma.hermesRecommendationEvaluation.findMany = async () => ([
-    { id: 'e-early', userId: 'user-1', actionId: 'act-1', windowDays: window, status: 'NOT_READY', action: { completedAt: new Date(Date.now() - (window - 2) * 86400000) } },
-    { id: 'e-due', userId: 'user-1', actionId: 'act-1', windowDays: window, status: 'NOT_READY', action: { completedAt: new Date(Date.now() - window * 86400000) } },
-  ]);
-  evaluationRow = null;
-  const sweep = await hermesMemoryService.evaluateDueActions();
-  check('sweep scans both candidates', sweep.scanned === 2);
-  check('sweep defers the not-yet-due candidate', sweep.pending === 1);
-  check('sweep evaluates the due candidate', sweep.evaluated === 1);
-
   const passed = checks.filter((c) => c.condition).length;
   console.log(`\n=== ${passed}/${checks.length} checks passed ===`);
   if (passed !== checks.length) process.exitCode = 1;
