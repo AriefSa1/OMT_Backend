@@ -7,6 +7,7 @@ const {
   getDailyBriefing,
   optimizeAdsKeywords,
   suggestScaleUp,
+  getActionAnalysis,
 } = require('../controllers/aiController');
 
 const router = express.Router();
@@ -20,5 +21,6 @@ router.get('/daily-briefing', getDailyBriefing);
 router.post('/daily-briefing', getDailyBriefing);
 router.post('/ads-keyword-optimization', optimizeAdsKeywords);
 router.post('/scale-up-strategy', suggestScaleUp);
+router.get('/action-analysis', getActionAnalysis);
 
 module.exports = router;

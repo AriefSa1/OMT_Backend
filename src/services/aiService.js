@@ -6,11 +6,12 @@ const axios = require('axios');
  * model paling ringan dulu untuk hemat kredit.
  * Pastikan OPENROUTER_API_KEY sudah diset di environment untuk menggunakan fallback.
  */
+// Slug harus valid & tersedia di OpenRouter free-tier (yang lama sudah usang → 404/400).
+// Verifikasi berkala via https://openrouter.ai/api/v1/models (filter id berakhiran ':free').
+// Urut: instruct/JSON-andal dulu, model besar sebagai cadangan.
 const OPENROUTER_FREE_MODELS = [
-  'google/gemma-2-9b-it',
-  'meta/llama-3-70b-instruct',
-  'google/gemini-1.5-flash',
-  'microsoft/phi-3-mini-128k',
+  'openai/gpt-oss-20b:free',
+  'google/gemma-4-31b-it:free',
 ].filter(Boolean);
 
 /**
@@ -575,6 +576,117 @@ Kembalikan JSON murni (tanpa markdown):
 
 priorityActions: 2-4 item, urut dari paling mendesak, urgency salah satu dari TINGGI/SEDANG/RENDAH.
 risks: 1-3 item. dataGaps: hanya isi bila memang ada data "belum tersedia" di atas, selain itu [].`,
+    });
+  }
+
+  /**
+   * Jalankan prompt lewat provider yang tersedia. Beda dari callGemini: kalau Gemini
+   * TIDAK dikonfigurasi tapi OpenRouter dikonfigurasi, OpenRouter dipakai sebagai
+   * PRIMARY (bukan sekadar fallback). Ini yang membuat fitur AI tetap hidup saat toko
+   * hanya mengandalkan OpenRouter.
+   */
+  async runAnalysis({ prompt, trusted = {}, failMessage, logLabel }) {
+    if (this.ai) {
+      return this.callGemini({ prompt, trusted, failMessage, logLabel });
+    }
+    if (this.openrouterConfigured) {
+      try {
+        const parsed = await this.generateJsonWithOpenRouter(prompt, { maxRetries: 0 });
+        if (parsed) return this.aiResult(parsed, { ...trusted, provider: 'REAL_OPENROUTER_API' });
+        return this.aiFailed({ ...trusted }, failMessage || 'Provider AI tidak mengembalikan hasil.', 'EMPTY');
+      } catch (err) {
+        console.warn(`[AI Service] ${logLabel || 'analysis'} (OpenRouter) error: ${err.message}`);
+        return this.aiFailed({ ...trusted }, failMessage || 'Permintaan ke AI gagal.', err.aiErrorCode || 'UNKNOWN');
+      }
+    }
+    return this.notConfigured({ ...trusted });
+  }
+
+  /**
+   * Mesin analisa mendalam "Action Center" — dipakai bersama oleh tab Pusat Optimasi,
+   * Aksi & Tugas, dan Wawasan Growth. Diberi konteks KAYA (tren toko WoW, funnel per-produk,
+   * ekonomi per-kampanye, produk menurun beruntun, risiko stok) DAN sinyal rule-based yang
+   * sudah ada — supaya modelnya MENDIAGNOSA, bukan mengulang saran umum yang sudah diterapkan.
+   * Satu panggilan → tiap tab merender irisan yang relevan (priorityActions/deepDives/growth).
+   */
+  async generateActionCenterAnalysis({
+    periodLabel = '', store = {}, weekly = {}, funnelProducts = [],
+    decliningProducts = [], adsCampaigns = [], stockRisks = [], existingSignals = [],
+  } = {}) {
+    if (!this.ai && !this.openrouterConfigured) return this.notConfigured({ periodLabel });
+
+    const rp = (v) => (v === null || v === undefined || !Number.isFinite(Number(v))) ? 'n/a' : `Rp ${Number(v).toLocaleString('id-ID')}`;
+    const pctd = (v) => (v === null || v === undefined || !Number.isFinite(Number(v))) ? 'n/a' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`;
+    const n = (v) => (v === null || v === undefined || !Number.isFinite(Number(v))) ? 'n/a' : Number(v).toLocaleString('id-ID');
+    const p2 = (v, s = '') => (v === null || v === undefined || !Number.isFinite(Number(v))) ? 'n/a' : `${Number(v).toFixed(2)}${s}`;
+
+    const storeLine = [
+      `GMV ${rp(store.gmv)} (${pctd(store.gmvTrendPct)} vs periode sebelumnya)`,
+      `Pesanan ${n(store.orders)} (${pctd(store.ordersTrendPct)})`,
+      `AOV ${rp(store.avgOrderValue)}`,
+      store.adsRoas != null ? `ROAS ${p2(store.adsRoas, 'x')}` : 'ROAS n/a',
+      store.cancelRate != null ? `Batal ${p2(store.cancelRate, '%')}` : null,
+    ].filter(Boolean).join(' · ');
+
+    const fmtProduct = (x) => `- ${x.name}: pengunjung ${n(x.visitors)}, CTR ${p2(x.ctr, '%')}, +keranjang ${p2(x.addToCartRate, '%')}, konversi ${p2(x.conversionRate, '%')}, terjual ${n(x.salesCount)}, stok ${n(x.stock)}`;
+    const fmtCampaign = (c) => `- ${c.name}: biaya ${rp(c.spend)}, penjualan ${rp(c.sales)}, ROAS ${p2(c.roas, 'x')}, CTR ${p2(c.ctr, '%')}`;
+    const fmtDeclining = (d) => `- ${d.name}: ${d.metric} turun ${d.streak} minggu beruntun (terakhir ${n(d.latest)} vs awal ${n(d.baseline)})`;
+    const fmtStock = (s) => `- ${s.name || s.sku}: stok ${n(s.stock)}, terjual ${n(s.salesCount)}${s.variance != null && s.variance !== 0 ? `, selisih Shopee↔Gudang ${n(s.variance)} unit` : ''}`;
+
+    const prompt = `Anda kepala analis pertumbuhan e-commerce Shopee Indonesia yang berpengalaman. Pemilik toko INI sudah mahir dasar (foto bagus, judul ber-keyword, harga kompetitif, iklan menyala) dan MUAK saran generik. Tugas Anda: temukan yang TIDAK terlihat dari sekadar melihat angka — pola, akar masalah, trade-off, peluang tersembunyi spesifik toko ini — lalu beri tindakan yang belum tentu terpikir.
+
+PERIODE: ${periodLabel || 'terkini'}
+
+KONDISI TOKO (dengan tren vs periode sebelumnya):
+${storeLine}
+7 hari terakhir: GMV ${rp(weekly.gmv)}, ${n(weekly.orders)} pesanan, AOV ${rp(weekly.averageOrderValue)}
+
+FUNNEL PER-PRODUK (teratas berdasar traffic):
+${funnelProducts.length ? funnelProducts.map(fmtProduct).join('\n') : '(funnel per-produk belum tersinkron)'}
+
+PRODUK KEHILANGAN MOMENTUM (turun beberapa minggu beruntun):
+${decliningProducts.length ? decliningProducts.map(fmtDeclining).join('\n') : '(tidak ada / histori mingguan belum cukup)'}
+
+EKONOMI IKLAN PER-KAMPANYE:
+${adsCampaigns.length ? adsCampaigns.map(fmtCampaign).join('\n') : '(data kampanye belum tersinkron)'}
+
+RISIKO STOK:
+${stockRisks.length ? stockRisks.map(fmtStock).join('\n') : '(tidak ada risiko stok menonjol)'}
+
+SINYAL RULE-BASED YANG SUDAH DIDETEKSI SISTEM (pemilik SUDAH tahu ini — JANGAN diulang; pakai sebagai pijakan untuk menggali LEBIH DALAM):
+${existingSignals.length ? existingSignals.slice(0, 25).map((s) => `- [${s.priority}] ${s.title}`).join('\n') : '(tidak ada)'}
+
+ATURAN KERAS:
+1. DILARANG mengulang sinyal rule-based atau saran umum ("perbaiki foto", "optimalkan listing", "naikkan budget"). Setiap poin harus menambah SUDUT baru: kenapa terjadi, apa akar sebenarnya, langkah tak-obvious.
+2. Setiap poin WAJIB: (a) sebut entitas spesifik (produk/kampanye/SKU), (b) sertakan angka sebagai BUKTI, (c) tindakan konkret yang bisa dieksekusi, (d) perkiraan dampak Rupiah/persen bila mungkin.
+3. Prioritaskan berdasar dampak × kemudahan. HUBUNGKAN antar-metrik (mis. konversi tinggi tapi traffic turun = under-exposed, dorong iklan; ROAS>4 budget kecil = under-invested; +keranjang tinggi tapi konversi rendah = hambatan checkout/ongkir).
+4. Data tak ada → tulis di dataGaps, jangan mengarang.
+5. Sertakan "avoid": hal yang TAMPAK menarik tapi sebaiknya TIDAK dilakukan sekarang (jebakan/ROI rendah), dengan alasan.
+
+Kembalikan JSON murni (tanpa markdown):
+{
+  "executiveSummary": { "headline": "kalimat kunci terpenting periode ini", "readout": "2-4 kalimat membaca kondisi & menghubungkan antar-metrik" },
+  "priorityActions": [ { "title": "...", "area": "PRODUK|IKLAN|STOK|TOKO", "targetEntity": "nama entitas", "why": "akar masalah + angka bukti", "how": "langkah konkret", "expectedImpact": "mis. '+Rp X/minggu' / '-Rp Y iklan sia-sia'", "effort": "RENDAH|SEDANG|TINGGI", "confidence": "TINGGI|SEDANG|RENDAH", "urgency": "TINGGI|SEDANG|RENDAH" } ],
+  "deepDives": {
+    "product": [ { "entity": "nama produk", "diagnosis": "akar masalah spesifik", "action": "tindakan", "expectedImpact": "...", "evidence": "angka" } ],
+    "ads": [ { "entity": "nama kampanye", "diagnosis": "...", "action": "...", "expectedImpact": "...", "evidence": "..." } ],
+    "stock": [ { "entity": "SKU/produk", "diagnosis": "...", "action": "...", "expectedImpact": "...", "evidence": "..." } ]
+  },
+  "growth": {
+    "opportunities": [ { "title": "peluang tumbuh spesifik", "rationale": "kenapa (data)", "move": "langkah", "expectedImpact": "..." } ],
+    "risks": [ { "risk": "...", "signal": "angka penanda", "mitigation": "..." } ]
+  },
+  "avoid": [ { "thing": "yang jangan dilakukan", "reason": "kenapa buang waktu/berisiko" } ],
+  "dataGaps": [ "data yang perlu disinkronkan agar analisa berikut lebih tajam" ]
+}
+
+priorityActions 3-6 item (paling berdampak dulu). deepDives 0-4 per area (isi hanya yang ada bukti). growth.opportunities 2-4. avoid 1-3. Lebih baik kosong daripada mengarang.`;
+
+    return this.runAnalysis({
+      prompt,
+      trusted: { periodLabel },
+      failMessage: 'Gagal menyusun analisa mendalam.',
+      logLabel: 'action center analysis',
     });
   }
 
