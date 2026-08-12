@@ -758,6 +758,12 @@ class HermesAnalysisService {
     const content = result.response?.choices?.[0]?.message?.content;
     const validatedOutput = hermesOutputValidator.parseAndValidate(content, context);
     if (!validatedOutput.valid) {
+      // Alasan penolakan (bukan data mentah) selalu di-log agar kegagalan kontrak
+      // dapat didiagnosa dari server. Isi mentah model hanya di-dump bila HERMES_DEBUG=true.
+      console.warn(`[Hermes] Output ${validatedOutput.errorCode || 'INVALID_CONTRACT'} ditolak validator:`, (validatedOutput.errors || []).slice(0, 12).join(' | ') || '(tanpa detail)');
+      if (String(process.env.HERMES_DEBUG || '').toLowerCase() === 'true') {
+        console.warn('[Hermes][DEBUG] Isi mentah model (dipotong 4000):', String(content).slice(0, 4000));
+      }
       return {
         success: false,
         provider: 'HERMES_AGENT',
