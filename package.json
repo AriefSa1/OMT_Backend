@@ -15,6 +15,7 @@
     "test:hermes-analysis": "node test-hermes-analysis.js",
     "test:hermes-output": "node test-hermes-output-validator.js",
     "test:hermes-canonical": "node test-hermes-canonical.js",
+    "test:hermes-ads-evidence": "node test-hermes-ads-evidence.js",
     "test:hermes-contract": "node test-hermes-contract.js",
     "test:hermes-learning": "node test-hermes-learning-loop.js",
     "test:hermes-eval-window": "node test-hermes-eval-window.js",

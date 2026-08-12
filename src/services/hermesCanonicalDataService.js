@@ -199,6 +199,50 @@ class HermesCanonicalDataService {
       evidence('ads_clicks', 'clicks', metrics.clicks, 'count', 'Shopee Ads live', 'clicks', sourcePeriod, 'store'),
       evidence('ads_ctr', 'ctr', metrics.ctr, '%', 'Shopee Ads live', 'ctr', sourcePeriod, 'store'),
     ];
+
+    // Kampanye diproyeksikan ke field berskala benar (tanpa rawSpend/rawSales) untuk details.
+    const detailCampaigns = (result.topCampaigns || []).slice(0, 20).map((campaign) => ({
+      id: campaign.id,
+      name: campaign.name,
+      type: campaign.type,
+      state: campaign.state,
+      dailyBudget: campaign.dailyBudget,
+      spend: campaign.spend,
+      sales: campaign.sales,
+      voucherSpend: campaign.voucherSpend,
+      voucherSales: campaign.voucherSales,
+      impressions: campaign.impressions,
+      clicks: campaign.clicks,
+      orders: campaign.orders,
+      itemSold: campaign.itemSold,
+      roas: campaign.roas,
+      ctr: campaign.ctr,
+    }));
+    // Angka tiap kampanye juga dimasukkan ke evidence ledger agar bisa DIVALIDASI dan
+    // disitasi (bukan sekadar dipercaya di prosa). Dibatasi 10 kampanye paling material
+    // (spend tertinggi) × field valid, supaya ledger tetap < 100 item (batas sanitizer).
+    const campaignEvidenceRows = [...detailCampaigns]
+      .sort((left, right) => (Number(right.spend) || 0) - (Number(left.spend) || 0))
+      .slice(0, 10)
+      .flatMap((campaign) => {
+        const cid = String(campaign.id);
+        const label = campaign.name || cid;
+        return [
+          ['spend', campaign.spend, 'IDR'],
+          ['sales', campaign.sales, 'IDR'],
+          ['roas', campaign.roas, 'x'],
+          ['impressions', campaign.impressions, 'count'],
+          ['clicks', campaign.clicks, 'count'],
+          ['ctr', campaign.ctr, '%'],
+          ['orders', campaign.orders, 'count'],
+        ]
+          .filter(([, value]) => value !== null && value !== undefined && Number.isFinite(Number(value)))
+          .map(([field, value, unit]) => evidence(
+            `ads_campaign_${cid}_${field}`,
+            `${label} · ${field}`,
+            value, unit, 'Shopee Ads live', `campaign[${cid}].${field}`, sourcePeriod, 'campaign',
+          ));
+      });
     return {
       success: true,
       intent,
@@ -212,30 +256,13 @@ class HermesCanonicalDataService {
       trustedMetrics: metrics,
       comparisons: {},
       details: {
-        // Hanya teruskan angka yang SUDAH berskala benar. Objek kampanye asli juga
-        // membawa field mentah (rawSpend/rawSales = nilai sebelum dibagi amountDivisor);
-        // bila ikut terkirim, model bisa keliru memakainya dan melaporkan spend ratusan
-        // kali lipat (mis. rawSpend 9,7 jt vs spend asli ~97 rb). Proyeksikan ke subset aman.
-        campaigns: (result.topCampaigns || []).slice(0, 20).map((campaign) => ({
-          id: campaign.id,
-          name: campaign.name,
-          type: campaign.type,
-          state: campaign.state,
-          dailyBudget: campaign.dailyBudget,
-          spend: campaign.spend,
-          sales: campaign.sales,
-          voucherSpend: campaign.voucherSpend,
-          voucherSales: campaign.voucherSales,
-          impressions: campaign.impressions,
-          clicks: campaign.clicks,
-          orders: campaign.orders,
-          itemSold: campaign.itemSold,
-          roas: campaign.roas,
-          ctr: campaign.ctr,
-        })),
+        // Hanya angka yang SUDAH berskala benar (tanpa rawSpend/rawSales mentah) yang
+        // diteruskan; jika field mentah ikut, model bisa keliru memakainya dan melaporkan
+        // spend ratusan kali lipat (mis. rawSpend 9,7 jt vs spend asli ~97 rb).
+        campaigns: detailCampaigns,
         campaignCountMeasured: Array.isArray(result.topCampaigns) ? result.topCampaigns.length : 0,
       },
-      evidence: evidenceRows,
+      evidence: [...evidenceRows, ...campaignEvidenceRows],
       allowedClaims: ['Gunakan hanya metrik iklan live yang tercantum pada evidence dan details.'],
       blockedClaims: ['Jangan menyimpulkan profit, rugi, atau kenaikan budget tanpa HPP, biaya marketplace, dan eksperimen terukur.'],
       dataGaps: [],
