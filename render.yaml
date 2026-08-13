@@ -27,3 +27,17 @@ services:
       # memakai webhook per pengguna. Kosongkan bila belum memakai Telegram.
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      # Hermes Agent (analisa berbasis bukti). `127.0.0.1` hanya untuk dev lokal — di Render
+      # arahkan ke endpoint yang terjangkau publik (mis. OpenRouter yang OpenAI-compatible,
+      # atau Cloudflare Tunnel ke Hermes lokal). Tanpa ini fitur Hermes menjawab NOT_CONFIGURED.
+      - key: HERMES_AGENT_ENABLED
+        value: "true"
+      - key: HERMES_AGENT_BASE_URL
+        sync: false
+      - key: HERMES_AGENT_API_KEY
+        sync: false
+      - key: HERMES_AGENT_MODEL
+        sync: false
+      # Opsional: batas request paralel saat agregasi KPI Product Performance (default 4).
+      - key: SHOPEE_PRODUCT_PERFORMANCE_CONCURRENCY
+        sync: false

@@ -92,6 +92,26 @@ async function getDailyBriefing(req, res) {
   }
 }
 
+/**
+ * GET /api/ai/action-analysis — analisa mendalam bersama untuk Pusat Optimasi,
+ * Aksi & Tugas, dan Wawasan Growth. Konteks kaya dirakit di aiAnalysisService.
+ */
+async function getActionAnalysis(req, res) {
+  try {
+    const aiAnalysisService = require('../services/aiAnalysisService');
+    const periodLabel = req.query.periodLabel || req.query.period || '7 hari terakhir';
+    const result = await aiAnalysisService.getActionCenterAnalysis({ periodLabel });
+    return res.json({
+      success: result.success,
+      provider: result.provider,
+      message: result.message,
+      analysis: result,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 module.exports = wrapHandlers({
   generateABCopy,
   predictRestock,
@@ -99,4 +119,5 @@ module.exports = wrapHandlers({
   getDailyBriefing,
   optimizeAdsKeywords,
   suggestScaleUp,
+  getActionAnalysis,
 });

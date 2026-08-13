@@ -18,6 +18,10 @@ model User {
   updatedAt DateTime       @updatedAt
   stores    StoreSession[]
   notificationConfig NotificationConfig?
+  hermesAnalysisMemories HermesAnalysisMemory[]
+  hermesAnalysisFeedback HermesAnalysisFeedback[]
+  hermesRecommendationActions HermesRecommendationAction[]
+  hermesRecommendationEvaluations HermesRecommendationEvaluation[]
 }
 
 /// Konfigurasi kanal notifikasi per pengguna. Admin mengisi ini agar bisa mengirim
@@ -79,6 +83,123 @@ model StoreSession {
   user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+/// Durable, tenant-scoped memory of a validated Hermes analysis. JSON snapshots are
+/// intentional: the evidence and context must remain auditable even when the live
+/// Seller Center data changes later.
+model HermesAnalysisMemory {
+  id                  String   @id @default(uuid())
+  userId              String
+  storeId             String
+  intent              String
+  periodStart         String
+  periodEnd           String
+  periodDays          Int
+  sourceMode          String
+  qualityStatus       String
+  skillId             String?
+  skillVersion        String?
+  provider            String?
+  model               String?
+  promptVersion       String   @default("1.1.0")
+  outputSchemaVersion String   @default("1.0")
+  contextJson         String
+  evidenceJson        String
+  analysisJson        String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user       User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feedback   HermesAnalysisFeedback[]
+  actions    HermesRecommendationAction[]
+
+  @@index([userId, createdAt])
+  @@index([userId, storeId, intent, createdAt])
+}
+
+/// Explicit human signal about whether a memory was useful or trustworthy. One user
+/// can revise their feedback, but cannot create duplicate feedback for one analysis.
+model HermesAnalysisFeedback {
+  id         String   @id @default(uuid())
+  userId     String
+  analysisId String
+  rating     String
+  reasonsJson String?
+  comment    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  analysis HermesAnalysisMemory @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  @@unique([analysisId, userId])
+  @@index([userId, createdAt])
+}
+
+/// A recommendation becomes learnable only when the user records what they actually
+/// did. The metric fields are optional because older/qualitative recommendations may
+/// be actionable but not measurable; those actions remain visible as unmeasured.
+model HermesRecommendationAction {
+  id                   String   @id @default(uuid())
+  userId               String
+  analysisId           String
+  recommendationIndex  Int
+  recommendationId     String
+  actionText           String
+  status               String   @default("PLANNED")
+  metricKey            String?
+  windowDays           Int?
+  baselineValue        Float?
+  targetValue          Float?
+  unit                 String?
+  baselinePeriodStartDate String?
+  baselinePeriodEndDate   String?
+  notes                String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user       User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  analysis   HermesAnalysisMemory          @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  evaluations HermesRecommendationEvaluation[]
+
+  @@unique([analysisId, recommendationIndex])
+  @@unique([analysisId, recommendationId])
+  @@index([userId, status])
+  @@index([userId, completedAt])
+}
+
+/// One immutable measurement slot per action and horizon. The row is created at
+/// completion and moves from NOT_READY to EVALUATED or INSUFFICIENT_DATA only after
+/// a canonical source can provide a valid measurement.
+model HermesRecommendationEvaluation {
+  id                 String   @id @default(uuid())
+  userId             String
+  actionId           String
+  windowDays         Int
+  windowStartDate    String?
+  windowEndDate      String?
+  status             String   @default("NOT_READY")
+  periodStatus       String   @default("NOT_CHECKED")
+  baselineValue      Float?
+  targetValue        Float?
+  actualValue        Float?
+  deltaValue         Float?
+  verdict            String?
+  evidenceJson       String?
+  effectivePeriodJson String?
+  notes              String?
+  evaluatedAt        DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user   User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action HermesRecommendationAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@unique([actionId, windowDays])
+  @@index([userId, status])
 }
 
 model ShopeeProduct {
@@ -547,4 +668,3 @@ model ShopeeCredential {
   @@unique([storeId])
   @@index([storeId])
 }
-
