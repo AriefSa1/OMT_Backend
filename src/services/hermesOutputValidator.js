@@ -73,6 +73,22 @@ function sanitizeNumericValue(container, key, path, allowedValues, warnings) {
   }
 }
 
+// metricKey/windowDays/baseline/target adalah metadata opsional untuk learning loop.
+// Metadata tracking yang tidak dikenal tidak boleh menggagalkan seluruh analisa yang
+// evidence-nya valid. Hapus metadata tersebut agar tidak tersimpan sebagai kontrak
+// palsu dan biarkan tindakan tetap tampil sebagai tindakan kualitatif/unmeasured.
+function discardInvalidTracking(action, path, warnings, reason) {
+  warnings.push(`${path}: ${reason} Metadata tracking dihapus; tindakan tetap dikembalikan tanpa outcome tracking.`);
+  delete action.metricKey;
+  delete action.windowDays;
+  for (const field of ['baseline', 'target']) {
+    if (!isPlainObject(action[field])) continue;
+    action[field].metric = null;
+    action[field].value = null;
+    action[field].unit = null;
+  }
+}
+
 function validateAnalysisOutput(output, context = {}) {
   const errors = [];
   const warnings = [];
@@ -142,15 +158,24 @@ function validateAnalysisOutput(output, context = {}) {
       if (!nonEmptyString(action.action)) errors.push(`${path}.action wajib diisi.`);
       if (!nonEmptyString(action.reason)) errors.push(`${path}.reason wajib diisi.`);
       if (!nonEmptyString(action.expectedMeasurement)) errors.push(`${path}.expectedMeasurement wajib diisi.`);
-      if (action.metricKey !== undefined && !nonEmptyString(action.metricKey)) errors.push(`${path}.metricKey harus berupa string yang tidak kosong.`);
+      if (action.metricKey !== undefined && !nonEmptyString(action.metricKey)) {
+        warnings.push(`${path}.metricKey tidak valid; metadata tracking dihapus.`);
+        delete action.metricKey;
+      }
       if (action.windowDays !== undefined) {
         const windowDays = finiteNumber(action.windowDays);
-        if (!Number.isInteger(windowDays) || ![7, 30].includes(windowDays)) errors.push(`${path}.windowDays harus 7 atau 30.`);
+        if (!Number.isInteger(windowDays) || ![7, 30].includes(windowDays)) {
+          warnings.push(`${path}.windowDays harus 7 atau 30; metadata tracking dihapus.`);
+          delete action.windowDays;
+        }
       }
       validateEvidenceIds(action.evidenceIds, evidenceMap, `${path}.evidenceIds`, errors);
       for (const field of ['baseline', 'target']) {
         if (action[field] !== undefined) {
-          if (!isPlainObject(action[field])) errors.push(`${path}.${field} harus berupa object.`);
+          if (!isPlainObject(action[field])) {
+            warnings.push(`${path}.${field} tidak valid; metadata tracking dihapus.`);
+            delete action[field];
+          }
           else sanitizeNumericValue(action[field], 'value', `${path}.${field}.value`, allowedValues, warnings);
         }
       }
@@ -165,11 +190,16 @@ function validateAnalysisOutput(output, context = {}) {
         unit: action.target?.unit || action.baseline?.unit,
         windowDays: action.windowDays,
       });
-      tracking.errors.forEach((error) => errors.push(`${path}: ${error}`));
+      if (tracking.errors.length > 0) {
+        discardInvalidTracking(action, path, warnings, tracking.errors.join(' '));
+      }
       tracking.warnings.forEach((warning) => warnings.push(`${path}: ${warning}`));
-      if (baselineMetric && targetMetric && baselineMetric !== targetMetric) errors.push(`${path}.baseline.metric dan target.metric harus sama.`);
-      if (action.metricKey && baselineMetric && normalizeMetricKey(context.intent, action.metricKey) !== baselineMetric) errors.push(`${path}.metricKey harus sama dengan baseline.metric.`);
-      if (action.metricKey && targetMetric && normalizeMetricKey(context.intent, action.metricKey) !== targetMetric) errors.push(`${path}.metricKey harus sama dengan target.metric.`);
+      const trackingContractMismatch = (baselineMetric && targetMetric && baselineMetric !== targetMetric)
+        || (action.metricKey && baselineMetric && normalizeMetricKey(context.intent, action.metricKey) !== baselineMetric)
+        || (action.metricKey && targetMetric && normalizeMetricKey(context.intent, action.metricKey) !== targetMetric);
+      if (trackingContractMismatch) {
+        discardInvalidTracking(action, path, warnings, 'metricKey, baseline.metric, dan target.metric tidak konsisten.');
+      }
       if (action.metricKey && (!action.baseline || finiteNumber(action.baseline.value) === null)) {
         warnings.push(`${path} belum memiliki baseline numerik; outcome tracking akan berstatus INSUFFICIENT_DATA.`);
       }
