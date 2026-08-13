@@ -411,6 +411,18 @@ Mengembalikan konfigurasi lokal Hermes tanpa melakukan probe ke service upstream
 `availability` selalu `NOT_CHECKED` sampai probe eksplisit ditambahkan; aplikasi tidak boleh
 menampilkan status online berdasarkan konfigurasi saja.
 
+### `GET /api/hermes/models`
+
+Membaca daftar model dari upstream Hermes pada `GET /v1/models`. Response dinormalisasi
+menjadi `{ id, object, ownedBy }` dan di-cache singkat di memory backend agar membuka
+halaman tidak memanggil proxy berulang-ulang. Query `?refresh=true` memaksa discovery baru.
+Frontend harus memakai daftar ini sebagai sumber pilihan model, bukan mengasumsikan
+`hermes-agent` selalu merupakan model inference yang tersedia.
+
+Pada probe lokal 13 Agustus 2026, upstream mengembalikan 363 model dan
+`upstage/solar-pro4:free` tersedia. Nilai ini adalah default deployment saat ini, tetapi
+daftar live tetap menjadi sumber kebenaran karena katalog Nous Portal dapat berubah.
+
 ### `POST /api/hermes/chat`
 
 Meneruskan request ke Hermes OpenAI-compatible `POST /v1/chat/completions`.
@@ -428,7 +440,8 @@ Body minimal:
 Field opsional yang diteruskan: `model`, `temperature`, `maxTokens`, `conversation`,
 `previousResponseId`, dan `mode`. `mode` defaultnya `EXPLORATORY` dan response diberi
 label `grounding: UNVERIFIED_EXPLORATORY`; mode ini tidak membawa data dashboard dan tidak
-boleh dianggap sebagai analisa bisnis. `GROUNDED_ANALYSIS` hanya merupakan label kontrak;
+boleh dianggap sebagai analisa bisnis. `GROUNDED_ANALYSIS` menandai request yang harus
+dikaitkan dengan konteks terukur;
 jalur analisa bisnis yang benar tetap `POST /api/hermes/analyze` karena endpoint tersebut
 memasang sumber kanonik, evidence ledger, rekonsiliasi, dan validator output. Streaming
 sengaja belum diaktifkan pada tahap eksperimen awal.
@@ -448,7 +461,11 @@ Response sukses membungkus response asli Hermes di field `response`:
 
 Konfigurasi lokal berada di `.env`: `HERMES_AGENT_ENABLED`, `HERMES_AGENT_BASE_URL`,
 `HERMES_AGENT_API_KEY`, `HERMES_AGENT_MODEL`, dan `HERMES_AGENT_TIMEOUT_MS`. Default URL
-adalah `http://127.0.0.1:8642/v1`, sesuai API server Hermes Agent.
+adalah `http://127.0.0.1:8642/v1` pada development. Pada production, jika
+`HERMES_AGENT_BASE_URL` belum tersedia, backend menggunakan fallback
+`https://hermes.ninetyfour.fun/v1`. API key tidak memiliki fallback dan tetap wajib diisi
+sebagai secret pada environment backend. Status juga mengembalikan `baseUrlSource` dan
+`missingConfiguration` agar UI dapat menjelaskan bagian konfigurasi yang belum lengkap.
 
 ### `POST /api/hermes/analyze/validate`
 

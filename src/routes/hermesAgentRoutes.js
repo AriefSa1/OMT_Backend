@@ -2,6 +2,7 @@ const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
 const {
   getStatus,
+  listModels,
   chat,
   validateAnalysis,
   analyze,
@@ -19,6 +20,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 router.get('/status', getStatus);
+router.get('/models', listModels);
 router.post('/chat', chat);
 router.post('/analyze/validate', validateAnalysis);
 router.post('/analyze', analyze);

@@ -33,11 +33,11 @@ services:
       - key: HERMES_AGENT_ENABLED
         value: "true"
       - key: HERMES_AGENT_BASE_URL
-        sync: false
+        value: https://hermes.ninetyfour.fun/v1
       - key: HERMES_AGENT_API_KEY
         sync: false
       - key: HERMES_AGENT_MODEL
-        sync: false
+        value: upstage/solar-pro4:free
       # Opsional: batas request paralel saat agregasi KPI Product Performance (default 4).
       - key: SHOPEE_PRODUCT_PERFORMANCE_CONCURRENCY
         sync: false

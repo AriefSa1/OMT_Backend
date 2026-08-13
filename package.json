@@ -7,7 +7,7 @@
     "postinstall": "prisma generate",
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "npx prisma generate && npx prisma db push",
+    "build": "npx prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "test:ai": "node test-ai-suite.js",
