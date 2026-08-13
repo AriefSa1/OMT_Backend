@@ -12,6 +12,14 @@ async function getStatus(req, res) {
   });
 }
 
+async function listModels(req, res) {
+  const result = await hermesAgentService.listModels({
+    force: req.query?.refresh === 'true',
+  });
+  const { statusCode = 200, ...payload } = result;
+  return res.status(statusCode).json(payload);
+}
+
 async function chat(req, res) {
   const result = await hermesAgentService.chat({
     messages: req.body?.messages,
@@ -35,6 +43,7 @@ function analysisArgs(req) {
     startDate: req.body?.startDate || req.body?.start_date,
     endDate: req.body?.endDate || req.body?.end_date,
     days: req.body?.days,
+    model: req.body?.model,
     user: req.user,
   };
 }
@@ -116,6 +125,7 @@ async function evaluateAction(req, res) {
 
 module.exports = wrapHandlers({
   getStatus,
+  listModels,
   chat,
   validateAnalysis,
   analyze,

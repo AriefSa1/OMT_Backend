@@ -51,6 +51,18 @@ async function main() {
     check('forwards messages and disables streaming for this first route', request.body.messages[0].content === 'Halo' && request.body.stream === false);
     check('labels exploratory chat as unverified', success.mode === 'EXPLORATORY' && success.grounding === 'UNVERIFIED_EXPLORATORY');
 
+    await hermesAgentService.chat({
+      messages: [{ role: 'user', content: 'Pakai model pilihan' }],
+      model: 'deepseek/deepseek-v4-pro',
+    });
+    check('forwards the user-selected model', request.body.model === 'deepseek/deepseek-v4-pro');
+
+    const originalGet = axios.get;
+    axios.get = async () => ({ data: { data: [{ id: 'z-model' }, { id: 'a-model' }, { id: 'z-model' }] } });
+    const discovered = await hermesAgentService.listModels({ force: true });
+    check('discovers and normalizes upstream models', discovered.success === true && discovered.modelCount === 2 && discovered.models[0].id === 'a-model');
+    axios.get = originalGet;
+
     const grounded = await hermesAgentService.chat({
       messages: [{ role: 'user', content: 'Analisa data' }],
       mode: 'GROUNDED_ANALYSIS',

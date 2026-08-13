@@ -757,6 +757,8 @@ class HermesAnalysisService {
 
     const result = await hermesAgentService.chat({
       messages: this.buildMessages(context),
+      model: args.model,
+      mode: 'GROUNDED_ANALYSIS',
       temperature: 0.2,
       maxTokens: 6000,
       responseFormat: { type: 'json_object' },

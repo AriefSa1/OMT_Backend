@@ -1,9 +1,11 @@
 const axios = require('axios');
 
-const DEFAULT_BASE_URL = 'http://127.0.0.1:8642/v1';
+const DEFAULT_LOCAL_BASE_URL = 'http://127.0.0.1:8642/v1';
+const DEFAULT_PRODUCTION_BASE_URL = 'https://hermes.ninetyfour.fun/v1';
 const DEFAULT_MODEL = 'hermes-agent';
 const DEFAULT_TIMEOUT_MS = 120000;
 const MAX_MESSAGES = 100;
+const MODEL_CACHE_TTL_MS = 60 * 1000;
 const CHAT_MODES = Object.freeze({
   EXPLORATORY: 'EXPLORATORY',
   GROUNDED_ANALYSIS: 'GROUNDED_ANALYSIS',
@@ -11,6 +13,12 @@ const CHAT_MODES = Object.freeze({
 
 function cleanBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function defaultBaseUrl() {
+  return String(process.env.NODE_ENV || '').toLowerCase() === 'production'
+    ? DEFAULT_PRODUCTION_BASE_URL
+    : DEFAULT_LOCAL_BASE_URL;
 }
 
 function parseTimeout(value) {
@@ -60,12 +68,15 @@ function validateMessages(messages) {
 
 class HermesAgentService {
   constructor() {
+    this.modelCache = null;
     this.refreshFromEnv();
   }
 
   refreshFromEnv() {
     this.enabled = String(process.env.HERMES_AGENT_ENABLED || '').toLowerCase() === 'true';
-    this.baseUrl = cleanBaseUrl(process.env.HERMES_AGENT_BASE_URL || DEFAULT_BASE_URL);
+    const configuredBaseUrl = cleanBaseUrl(process.env.HERMES_AGENT_BASE_URL);
+    this.baseUrl = configuredBaseUrl || defaultBaseUrl();
+    this.baseUrlSource = configuredBaseUrl ? 'ENVIRONMENT' : 'PRODUCTION_DEFAULT';
     this.apiKey = String(process.env.HERMES_AGENT_API_KEY || '').trim();
     this.defaultModel = String(process.env.HERMES_AGENT_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
     this.timeoutMs = parseTimeout(process.env.HERMES_AGENT_TIMEOUT_MS);
@@ -76,19 +87,89 @@ class HermesAgentService {
   }
 
   getStatus() {
+    const missingConfiguration = [];
+    if (!this.enabled) missingConfiguration.push('HERMES_AGENT_ENABLED');
+    if (!this.apiKey) missingConfiguration.push('HERMES_AGENT_API_KEY');
+
     return {
       success: true,
       provider: 'HERMES_AGENT',
       enabled: this.enabled,
       configured: this.isConfigured(),
       baseUrl: this.baseUrl || null,
+      baseUrlSource: this.baseUrlSource,
       model: this.defaultModel,
       timeoutMs: this.timeoutMs,
+      missingConfiguration,
       availability: 'NOT_CHECKED',
       message: this.isConfigured()
         ? 'Hermes Agent dikonfigurasi. Ketersediaan belum diprobe.'
-        : 'Hermes Agent belum dikonfigurasi secara lengkap.',
+        : missingConfiguration.includes('HERMES_AGENT_API_KEY')
+          ? 'URL Hermes sudah tersedia, tetapi HERMES_AGENT_API_KEY belum diisi di backend.'
+          : 'Hermes Agent belum dikonfigurasi secara lengkap.',
     };
+  }
+
+  async listModels({ force = false } = {}) {
+    if (!this.isConfigured()) {
+      return {
+        success: false,
+        provider: 'HERMES_AGENT',
+        errorCode: 'NOT_CONFIGURED',
+        models: [],
+        defaultModel: this.defaultModel,
+        message: 'Hermes Agent belum dikonfigurasi. Isi HERMES_AGENT_API_KEY di backend.',
+        statusCode: 503,
+      };
+    }
+
+    const now = Date.now();
+    if (!force && this.modelCache && now - this.modelCache.loadedAt < MODEL_CACHE_TTL_MS) {
+      return { ...this.modelCache.payload, cached: true };
+    }
+
+    try {
+      const response = await axios.get(`${this.baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        timeout: Math.min(this.timeoutMs, 30000),
+      });
+      const rawModels = Array.isArray(response.data?.data) ? response.data.data : [];
+      const models = rawModels
+        .map((entry) => (typeof entry === 'string' ? { id: entry } : entry))
+        .filter((entry) => entry && typeof entry.id === 'string' && entry.id.trim())
+        .map((entry) => ({
+          id: entry.id.trim(),
+          object: entry.object || 'model',
+          ownedBy: entry.owned_by || entry.ownedBy || null,
+        }))
+        .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.id === entry.id) === index)
+        .sort((left, right) => left.id.localeCompare(right.id));
+
+      const payload = {
+        success: true,
+        provider: 'HERMES_AGENT',
+        models,
+        modelCount: models.length,
+        defaultModel: this.defaultModel,
+        defaultModelAvailable: models.some((entry) => entry.id === this.defaultModel),
+        baseUrl: this.baseUrl,
+        cached: false,
+      };
+      this.modelCache = { loadedAt: now, payload };
+      return payload;
+    } catch (err) {
+      const classified = classifyHermesError(err);
+      console.warn(`[Hermes Agent] model discovery ${classified.code}: ${err.message}`);
+      return {
+        success: false,
+        provider: 'HERMES_AGENT',
+        errorCode: classified.code,
+        models: [],
+        defaultModel: this.defaultModel,
+        message: `Daftar model Hermes tidak dapat dibaca: ${classified.message}`,
+        statusCode: classified.status,
+      };
+    }
   }
 
   async chat({ messages, model, temperature, maxTokens, conversation, previousResponseId, responseFormat, mode = CHAT_MODES.EXPLORATORY } = {}) {
