@@ -478,6 +478,15 @@ internal), bukan snapshot database lama. Adapter yang dipakai adalah:
 - `PERFORMA_PRODUK` → `Product Performance` seluruh halaman, direkonsiliasi terhadap
   `Product Overview confirmed` untuk GMV dan unit.
 
+Untuk `PERFORMA_PRODUK`, KPI aggregate (`confirmedSales`, `confirmedOrders`,
+`confirmedUnits`, views, visitors, buyers, dan average conversion rate) dihitung dari seluruh
+halaman hasil Product Performance. Detail yang dikirim ke Hermes dibatasi pada maksimal 10
+produk teratas berdasarkan `confirmedSales`; field response mentah seperti `raw` dan field
+harga yang tidak menjadi metric evidence tidak ikut dikirim. Metric per produk teratas
+dimasukkan ke evidence ledger dengan `entityId`/`entityName`, sehingga angka detail dapat
+disitasi dan divalidasi. Context juga menyertakan `detailScope` agar Hermes tidak menganggap
+subset produk sebagai seluruh katalog.
+
 Snapshot lokal hanya dipakai oleh regression test dan diagnostik internal. Jika sumber live
 tidak tersedia atau rekonsiliasi core mismatch, status menjadi `BLOCKED` dan tidak ada
 request yang diteruskan ke Hermes.
@@ -520,6 +529,13 @@ Output JSON yang tidak memenuhi kontrak evidence ditolak sebagai `INVALID_RESPON
 aritmetika seperti ROAS, CTR, AOV, dan conversion rate dihitung di backend dari field sumber;
 Hermes hanya menafsirkan angka trusted tersebut.
 
+Untuk mendiagnosis kegagalan, response error analisis menyertakan `requestId`,
+`validationErrors`, `validationWarnings`, dan object `diagnostic`. Backend juga menulis satu
+baris JSON berlabel `[Hermes][Diagnostic]` ke terminal, berisi tahap kegagalan, intent, periode,
+dan alasan validator tanpa mencetak credential atau payload mentah. Jika perlu memeriksa
+respons mentah model secara lokal, set `HERMES_DEBUG=true`; output tersebut dipotong maksimal
+4.000 karakter dan hanya boleh dipakai pada environment development.
+
 Payload `TRUSTED_CONTEXT` yang dikirim ke agent melewati sanitizer recursive: key credential,
 cookie, token, secret, password, dan authorization direduksi menjadi `[REDACTED]`, sedangkan
 string, array, object, dan kedalaman konteks dibatasi agar feedback atau detail sumber tidak
@@ -560,6 +576,9 @@ memori tidak menggagalkan hasil analisa utama.
 - `PATCH /api/hermes/actions/:id` menerima status `PLANNED`, `IN_PROGRESS`, `COMPLETED`,
   `SKIPPED`, atau `CANCELLED`. Saat tindakan ditandai `COMPLETED`, server membuat slot
   evaluasi 7 dan 30 hari.
+- `DELETE /api/hermes/actions/:id` hanya menghapus tindakan milik user dengan status
+  `PLANNED`/belum dimulai. Tindakan yang sudah dimulai ditolak agar histori pembelajaran
+  tidak hilang.
 - `POST /api/hermes/actions/:id/evaluate` menerima `windowDays: 7` atau `30`. Sebelum
   jendela waktunya tercapai, response berstatus `NOT_READY`. Setelahnya server membaca
   adapter live kanonik; bila metric key, baseline, atau sumber tidak valid, hasilnya
@@ -569,6 +588,9 @@ Rekomendasi hanya dapat menjadi outcome terukur jika output Hermes menyertakan `
 yang terdaftar untuk intent tersebut, unit yang cocok, baseline numerik yang ada di evidence,
 serta `windowDays` 7 atau 30. Setiap rekomendasi mendapat `recommendationId` stabil seperti
 `rec-1`, dan memory menyimpan `promptVersion` serta `outputSchemaVersion` untuk audit.
+Untuk kompatibilitas istilah model, `PERFORMA_PRODUK.conversionRate` dinormalisasi server
+menjadi metric canonical `averageConversionRate`; nilai yang disimpan dan dievaluasi tetap
+memakai nama canonical tersebut.
 
 Feedback dapat menyertakan `reasons`, misalnya `DATA_MISMATCH`, `ANALYSIS_TOO_GENERAL`,
 `RECOMMENDATION_NOT_EXECUTABLE`, `NUMBERS_CORRECT_INTERPRETATION_WRONG`,

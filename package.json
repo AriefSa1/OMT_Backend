@@ -21,6 +21,8 @@
     "test:hermes-eval-window": "node test-hermes-eval-window.js",
     "test:hermes-optimization": "node test-hermes-optimization.js",
     "test:hermes-security": "node test-hermes-security.js",
+    "test:hermes-diagnostics": "node test-hermes-diagnostics.js",
+    "test:hermes-product-filtering": "node test-hermes-product-filtering.js",
     "test:hermes-ranges": "node test-hermes-range-output.js",
     "test:shopee-product-pagination": "node test-shopee-product-pagination.js",
     "test:shopee-dashboard-ranges": "node test-shopee-dashboard-range.js",

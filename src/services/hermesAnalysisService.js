@@ -6,6 +6,7 @@ const hermesOutputValidator = require('./hermesOutputValidator');
 const hermesMemoryService = require('./hermesMemoryService');
 const { sanitizeForHermes } = require('./hermesPayloadSanitizer');
 const { getSkill } = require('./hermesSkillRegistry');
+const { listMetrics } = require('./hermesMetricRegistry');
 const { reviewContext } = require('./hermesDecisionReviewer');
 
 const HERMES_PROMPT_VERSION = '1.1.0';
@@ -103,8 +104,10 @@ function resolveAnalysisRange({ startDate, endDate, days } = {}) {
 
   if (start && end && start > end) [start, end] = [end, start];
   if (!start || !end) {
-    // Exactly 30 calendar dates: today plus the preceding 29 dates.
-    end = dateKey();
+    // Shopee native past7days/past30days memakai hari selesai terakhir dan tidak
+    // memasukkan hari berjalan. Selaraskan default range agar angka yang dikirim
+    // tidak diberi label seolah-olah mencakup hari ini.
+    end = shiftDateKey(dateKey(), -1);
     start = shiftDateKey(end, -(desiredDays - 1));
   }
 
@@ -451,6 +454,7 @@ class HermesAnalysisService {
         intent: normalizedIntent,
         period,
         skill: getSkill(normalizedIntent),
+        metricCatalog: listMetrics(normalizedIntent),
         promptVersion: HERMES_PROMPT_VERSION,
         learning,
         dataGaps: canonical.quality.dataGaps,
@@ -650,6 +654,7 @@ class HermesAnalysisService {
       success: true,
       intent,
       skill: getSkill(intent),
+      metricCatalog: listMetrics(intent),
       promptVersion: HERMES_PROMPT_VERSION,
       period,
       quality,
@@ -679,6 +684,10 @@ class HermesAnalysisService {
         content: 'Setiap prioritizedAction boleh menyertakan metricKey dan windowDays. Gunakan metricKey yang sama dengan baseline.metric/target.metric dan hanya angka/unit yang ada pada evidence; jika tidak dapat dibuktikan, gunakan null dan jangan mengarang.',
       },
       {
+        role: 'system',
+        content: `Metric contract canonical: ${JSON.stringify(context.metricCatalog || [])}. Gunakan unit persis dari katalog; untuk conversion rate gunakan percentage points dengan unit "%", bukan unit "ratio" atau pecahan 0-1.`,
+      },
+      {
         role: 'user',
         content: `TRUSTED_CONTEXT:\n${JSON.stringify(safeContext)}`,
       },
@@ -703,6 +712,7 @@ class HermesAnalysisService {
         sourceMode: context.sourceMode || context.quality?.sourceMode || 'SNAPSHOT',
         reconciliation: context.quality?.reconciliation || { status: 'NOT_EVALUATED', fields: {} },
         skill: context.skill || null,
+        metricCatalog: context.metricCatalog || [],
         promptVersion: context.promptVersion || HERMES_PROMPT_VERSION,
         learning: context.learning || null,
       },
@@ -752,7 +762,16 @@ class HermesAnalysisService {
       responseFormat: { type: 'json_object' },
     });
     if (!result.success) {
-      return { ...result, intent: context.intent, period: context.period, quality: context.quality, dataGaps: context.dataGaps };
+      const diagnostic = {
+        stage: 'HERMES_UPSTREAM',
+        requestId: args.requestId || null,
+        intent: context.intent,
+        errorCode: result.errorCode || 'UPSTREAM_ERROR',
+        provider: result.provider || 'HERMES_AGENT',
+        model: result.model || null,
+      };
+      console.warn('[Hermes][Diagnostic]', JSON.stringify(diagnostic));
+      return { ...result, intent: context.intent, period: context.period, quality: context.quality, dataGaps: context.dataGaps, requestId: args.requestId || null, diagnostic };
     }
 
     const content = result.response?.choices?.[0]?.message?.content;
@@ -760,7 +779,20 @@ class HermesAnalysisService {
     if (!validatedOutput.valid) {
       // Alasan penolakan (bukan data mentah) selalu di-log agar kegagalan kontrak
       // dapat didiagnosa dari server. Isi mentah model hanya di-dump bila HERMES_DEBUG=true.
-      console.warn(`[Hermes] Output ${validatedOutput.errorCode || 'INVALID_CONTRACT'} ditolak validator:`, (validatedOutput.errors || []).slice(0, 12).join(' | ') || '(tanpa detail)');
+      const diagnostic = {
+        stage: 'OUTPUT_VALIDATION',
+        requestId: args.requestId || null,
+        intent: context.intent,
+        period: context.period,
+        errorCode: validatedOutput.errorCode || 'INVALID_CONTRACT',
+        errors: (validatedOutput.errors || []).slice(0, 20),
+        warnings: (validatedOutput.warnings || []).slice(0, 20),
+        response: {
+          contentType: typeof content,
+          contentLength: String(content || '').length,
+        },
+      };
+      console.warn('[Hermes][Diagnostic]', JSON.stringify(diagnostic));
       if (String(process.env.HERMES_DEBUG || '').toLowerCase() === 'true') {
         console.warn('[Hermes][DEBUG] Isi mentah model (dipotong 4000):', String(content).slice(0, 4000));
       }
@@ -774,6 +806,8 @@ class HermesAnalysisService {
         review: reviewer,
         validationErrors: validatedOutput.errors,
         validationWarnings: validatedOutput.warnings,
+        requestId: args.requestId || null,
+        diagnostic,
         message: validatedOutput.errorCode === 'INVALID_JSON'
           ? 'Hermes mengembalikan hasil yang bukan JSON valid untuk kontrak analisa.'
           : 'Hermes mengembalikan JSON, tetapi tidak memenuhi kontrak evidence analisa.',
@@ -811,6 +845,7 @@ class HermesAnalysisService {
       memoryPersisted: Boolean(memory),
       promptVersion: context.promptVersion || HERMES_PROMPT_VERSION,
       outputSchemaVersion: HERMES_OUTPUT_SCHEMA_VERSION,
+      requestId: args.requestId || null,
     };
   }
 }

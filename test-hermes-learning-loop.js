@@ -19,6 +19,7 @@ const normalized = hermesMemoryService.normalizeAction({
 check('action tracking keeps explicit metric and baseline', normalized.metricKey === 'confirmedSales' && normalized.baselineValue === 100 && normalized.windowDays === 7);
 const unmeasured = hermesMemoryService.normalizeAction({ action: 'Perbaiki foto produk' }, 1);
 check('qualitative action remains unmeasured instead of fabricated', unmeasured.metricKey === null && unmeasured.baselineValue === null && unmeasured.windowDays === null);
+check('planned-action deletion endpoint is implemented', typeof hermesMemoryService.deleteAction === 'function');
 
 const passed = checks.filter((item) => item.condition).length;
 console.log(`\n=== ${passed}/${checks.length} checks passed ===`);

@@ -120,10 +120,72 @@ function evidence(id, metric, value, unit, source, sourceField, period, grain, e
     sourceField,
     period,
     grain,
+    entityId: extra.entityId || null,
+    entityName: extra.entityName || null,
     dataAsOf: extra.dataAsOf || null,
     freshnessStatus: extra.dataAsOf ? 'MEASURED' : 'UNKNOWN',
     trusted: value !== null && value !== undefined && Number.isFinite(Number(value)),
   };
+}
+
+function safeProductId(value) {
+  return String(value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+}
+
+function projectProduct(product) {
+  return {
+    rank: product.rank,
+    itemId: product.itemId,
+    name: product.name,
+    sku: product.sku || null,
+    image: product.image || null,
+    itemStatus: product.itemStatus,
+    confirmedSales: product.confirmedSales,
+    confirmedOrders: product.confirmedOrders,
+    confirmedUnits: product.confirmedUnits,
+    confirmedBuyers: product.confirmedBuyers,
+    views: product.views,
+    visitors: product.visitors,
+    addToCartUnits: product.addToCartUnits,
+    addToCartRate: product.addToCartRate,
+    conversionRate: product.conversionRate,
+    bounceRate: product.bounceRate,
+    currency: product.currency || 'IDR',
+  };
+}
+
+function productEvidenceRows(products, period) {
+  return products
+    .slice()
+    .sort((left, right) => (Number(right.confirmedSales) || 0) - (Number(left.confirmedSales) || 0))
+    .slice(0, 10)
+    .flatMap((product) => {
+      const itemId = safeProductId(product.itemId);
+      const entityName = product.name || product.itemId;
+      return [
+        ['confirmedSales', product.confirmedSales, 'IDR'],
+        ['confirmedOrders', product.confirmedOrders, 'count'],
+        ['confirmedUnits', product.confirmedUnits, 'count'],
+        ['confirmedBuyers', product.confirmedBuyers, 'count'],
+        ['views', product.views, 'count'],
+        ['visitors', product.visitors, 'count'],
+        ['addToCartRate', product.addToCartRate, '%'],
+        ['averageConversionRate', product.conversionRate, '%'],
+        ['bounceRate', product.bounceRate, '%'],
+      ]
+        .filter(([, value]) => value !== null && value !== undefined && Number.isFinite(Number(value)))
+        .map(([metric, value, unit]) => evidence(
+          `product_${itemId}_${metric}`,
+          metric,
+          value,
+          unit,
+          'Product Performance',
+          `products[${product.itemId}].${metric === 'averageConversionRate' ? 'conversionRate' : metric}`,
+          period,
+          'product',
+          { entityId: String(product.itemId), entityName },
+        ));
+    });
 }
 
 function buildLiveQuality(intent, range, sources, gaps = [], reconciliation = { status: 'NOT_REQUIRED', fields: {} }) {
@@ -314,7 +376,9 @@ class HermesCanonicalDataService {
 
   async loadProducts({ intent, range, nativePeriod, storeId }) {
     const [performance, overview] = await Promise.all([
-      shopeeService.fetchProductPerformance({ period: nativePeriod, pageSize: 10, pageNum: 1, orderBy: 'confirmed_sales.desc', storeId }),
+      // Summary tetap dihitung dari seluruh halaman oleh adapter Shopee; batch ini
+      // hanya menentukan subset detail yang boleh masuk ke context Hermes.
+      shopeeService.fetchProductPerformance({ period: nativePeriod, pageSize: 50, pageNum: 1, orderBy: 'confirmed_sales.desc', storeId }),
       shopeeService.fetchProductOverview({ period: nativePeriod, storeId }),
     ]);
     const performanceSource = performance?.dataSource === 'SHOPEE_API' && performance?.live
@@ -345,6 +409,11 @@ class HermesCanonicalDataService {
       against: 'Product Overview confirmed',
     };
     const sourcePeriod = effectivePeriod(range, nativePeriod, performance.startTime, performance.endTime);
+    const detailProducts = (performance.products || [])
+      .map(projectProduct)
+      .sort((left, right) => (Number(right.confirmedSales) || 0) - (Number(left.confirmedSales) || 0))
+      .slice(0, 10);
+    const productDetailEvidence = productEvidenceRows(detailProducts, sourcePeriod);
     const evidenceRows = [
       evidence('product_total_sales', 'confirmedSales', productSummary.totalSales, 'IDR', 'Product Performance', 'summary.totalSales', sourcePeriod, 'product'),
       evidence('product_total_orders', 'confirmedOrders', productSummary.totalOrders, 'count', 'Product Performance', 'summary.totalOrders', sourcePeriod, 'product'),
@@ -354,6 +423,7 @@ class HermesCanonicalDataService {
       evidence('product_total_buyers', 'confirmedBuyers', productSummary.totalBuyers, 'count', 'Product Performance', 'summary.totalBuyers', sourcePeriod, 'product'),
       evidence('overview_confirmed_gmv', 'confirmedGmv', confirmedGmv, 'IDR', 'Product Overview', 'confirmed_gmv', sourcePeriod, 'store'),
       evidence('overview_confirmed_units', 'confirmedUnits', confirmedUnits, 'count', 'Product Overview', 'confirmed_unit_num', sourcePeriod, 'store'),
+      ...productDetailEvidence,
     ];
     return {
       success: true,
@@ -363,6 +433,7 @@ class HermesCanonicalDataService {
       effectivePeriod: sourcePeriod,
       quality: buildLiveQuality(intent, range, sources, [
         'Buyer, order, views, dan visitors pada Product Performance adalah agregat grain produk; jangan disamakan dengan buyer/UV unik tingkat toko.',
+        `Detail produk yang dikirim dibatasi ${detailProducts.length} produk teratas dari ${performance.total || detailProducts.length}; total KPI tetap dihitung dari seluruh halaman source.`,
         'Profit, stok gudang, dan kategori resmi tidak disimpulkan tanpa data pendukung.',
       ], reconciliation),
       trustedMetrics: {
@@ -377,8 +448,10 @@ class HermesCanonicalDataService {
       },
       comparisons: {},
       details: {
-        products: (performance.products || []).slice(0, 20),
+        products: detailProducts,
         catalogCount: performance.total,
+        detailCount: detailProducts.length,
+        detailScope: 'TOP_PRODUCTS_BY_CONFIRMED_SALES',
         reconciliation,
       },
       evidence: evidenceRows,

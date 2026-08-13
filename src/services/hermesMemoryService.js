@@ -27,6 +27,11 @@ function memoryModelPresent() {
   return Boolean(prisma && prisma.hermesAnalysisMemory);
 }
 
+function memoryDatabaseConfigured() {
+  const url = String(process.env.DATABASE_URL || '');
+  return url.startsWith('postgresql://') || url.startsWith('postgres://') || url.startsWith('prisma://');
+}
+
 function isMissingTableError(error) {
   if (!error) return false;
   if (error.code === 'P2021') return true;
@@ -35,7 +40,7 @@ function isMissingTableError(error) {
 }
 
 async function isMemoryStoreAvailable() {
-  if (!memoryModelPresent()) return false;
+  if (!memoryModelPresent() || !memoryDatabaseConfigured()) return false;
   if (memoryStoreProbe !== null) return memoryStoreProbe;
   try {
     await prisma.hermesAnalysisMemory.count();
@@ -396,6 +401,20 @@ class HermesMemoryService {
     }
     const refreshed = await prisma.hermesRecommendationAction.findFirst({ where: { id: row.id, userId: String(userId) }, include: { evaluations: true } });
     return { success: true, action: publicAction(refreshed) };
+  }
+
+  async deleteAction({ userId, actionId }) {
+    if (!(await isMemoryStoreAvailable())) return { success: false, errorCode: 'MEMORY_UNAVAILABLE', message: 'Penyimpanan memori Hermes tidak tersedia; tindakan belum dapat dihapus.' };
+    const current = await prisma.hermesRecommendationAction.findFirst({
+      where: { id: String(actionId), userId: String(userId) },
+      select: { id: true, status: true },
+    });
+    if (!current) return { success: false, errorCode: 'ACTION_NOT_FOUND', message: 'Tindakan tidak ditemukan untuk pengguna ini.' };
+    if (current.status !== 'PLANNED') {
+      return { success: false, errorCode: 'ACTION_ALREADY_STARTED', message: 'Tindakan hanya dapat dihapus sebelum statusnya dimulai.' };
+    }
+    await prisma.hermesRecommendationAction.delete({ where: { id: current.id } });
+    return { success: true, actionId: current.id, message: 'Tindakan yang belum dimulai berhasil dihapus.' };
   }
 
   async evaluateAction({ userId, actionId, windowDays }) {

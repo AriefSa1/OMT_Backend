@@ -32,6 +32,8 @@ async function main() {
   check('defaults to exactly 30 calendar dates', defaultRange.days === 30);
   check('default range is marked as defaulted', defaultRange.defaulted === true);
   check('range endpoints are ISO dates', /^\d{4}-\d{2}-\d{2}$/.test(defaultRange.startDate) && /^\d{4}-\d{2}-\d{2}$/.test(defaultRange.endDate));
+  const jakartaToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  check('default native range ends on the last completed day', defaultRange.endDate !== jakartaToday);
 
   console.log('\n3. Trusted arithmetic');
   const ads = hermesAnalysisService.aggregateAds([

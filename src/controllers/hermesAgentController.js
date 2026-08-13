@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const hermesAgentService = require('../services/hermesAgentService');
 const hermesAnalysisService = require('../services/hermesAnalysisService');
 const hermesMemoryService = require('../services/hermesMemoryService');
@@ -27,6 +28,7 @@ async function chat(req, res) {
 
 function analysisArgs(req) {
   return {
+    requestId: req.get('x-request-id') || crypto.randomUUID(),
     intent: req.body?.intent,
     prompt: req.body?.prompt,
     storeId: req.body?.storeId || req.body?.store_id,
@@ -95,6 +97,14 @@ async function updateAction(req, res) {
   return res.status(result.success ? 200 : 422).json(result);
 }
 
+async function deleteAction(req, res) {
+  const result = await hermesMemoryService.deleteAction({
+    userId: req.user.id,
+    actionId: req.params.id,
+  });
+  return res.status(result.success ? 200 : 422).json(result);
+}
+
 async function evaluateAction(req, res) {
   const result = await hermesMemoryService.evaluateAction({
     userId: req.user.id,
@@ -114,5 +124,6 @@ module.exports = wrapHandlers({
   saveFeedback,
   createAction,
   updateAction,
+  deleteAction,
   evaluateAction,
 });

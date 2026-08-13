@@ -10,6 +10,7 @@ const {
   saveFeedback,
   createAction,
   updateAction,
+  deleteAction,
   evaluateAction,
 } = require('../controllers/hermesAgentController');
 
@@ -26,6 +27,7 @@ router.get('/memories/:id', getMemory);
 router.post('/analyze/:id/feedback', saveFeedback);
 router.post('/analyze/:id/actions', createAction);
 router.patch('/actions/:id', updateAction);
+router.delete('/actions/:id', deleteAction);
 router.post('/actions/:id/evaluate', evaluateAction);
 
 module.exports = router;

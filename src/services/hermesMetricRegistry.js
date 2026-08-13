@@ -22,14 +22,21 @@ const METRIC_REGISTRY = Object.freeze({
     confirmedBuyers: { unit: 'count', direction: 'INCREASE', label: 'Confirmed buyers agregat produk' },
     views: { unit: 'count', direction: 'INCREASE_OR_BALANCE', label: 'Views agregat produk' },
     visitors: { unit: 'count', direction: 'INCREASE_OR_BALANCE', label: 'Visitors agregat produk' },
+    addToCartRate: { unit: '%', direction: 'INCREASE', label: 'Add-to-cart rate produk' },
     averageConversionRate: { unit: '%', direction: 'INCREASE', label: 'Average conversion rate' },
+    bounceRate: { unit: '%', direction: 'DECREASE', label: 'Bounce rate produk' },
   }),
 });
 
 const ALIASES = Object.freeze({
   IKLAN: Object.freeze({ roas: 'roas', ctr: 'ctr' }),
   PERFORMA_TOKO: Object.freeze({ gmv: 'confirmedGmv', sales: 'confirmedGmv', units: 'confirmedUnits', buyers: 'confirmedBuyers' }),
-  PERFORMA_PRODUK: Object.freeze({ sales: 'confirmedSales', units: 'confirmedUnits', orders: 'confirmedOrders' }),
+  PERFORMA_PRODUK: Object.freeze({
+    sales: 'confirmedSales',
+    units: 'confirmedUnits',
+    orders: 'confirmedOrders',
+    conversionRate: 'averageConversionRate',
+  }),
 });
 
 function normalizeMetricKey(intent, value) {
