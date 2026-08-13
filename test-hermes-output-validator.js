@@ -64,6 +64,43 @@ const ungroundedNumberOutput = {
 };
 const repaired = parseAndValidate(JSON.stringify(ungroundedNumberOutput), context);
 
+const storeContext = {
+  intent: 'PERFORMA_TOKO',
+  evidence: [
+    { id: 'store_gmv', metric: 'confirmedGmv', value: 1000000, unit: 'IDR' },
+    { id: 'store_buyers', metric: 'confirmedBuyers', value: 10, unit: 'count' },
+  ],
+  trustedMetrics: {
+    confirmedGmv: { value: 1000000, unit: 'IDR' },
+    confirmedBuyers: { value: 10, unit: 'count' },
+  },
+};
+const unsupportedStoreTracking = {
+  ...validOutput,
+  executiveVerdict: 'GMV dan buyer terukur dari Product Overview.',
+  rootCauseAnalysis: [],
+  criticalFindings: [{
+    severity: 'MEDIUM',
+    title: 'Funnel perlu diuji',
+    description: 'Ada metrik funnel yang perlu diverifikasi pada sumber yang sesuai.',
+    evidenceIds: ['store_gmv'],
+    impact: { metric: 'confirmedGmv', value: 1000000, unit: 'IDR' },
+    confidence: 'MEDIUM',
+  }],
+  prioritizedActions: [{
+    priority: 1,
+    action: 'Perbaiki alur toko dan ukur ulang.',
+    reason: 'Menguji hipotesis funnel.',
+    evidenceIds: ['store_gmv'],
+    metricKey: 'bounceRate',
+    windowDays: 7,
+    baseline: { metric: 'bounceRate', value: 0.6906190346332152, unit: 'ratio' },
+    target: { metric: 'bounceRate', value: 0.6906190346332152, unit: 'ratio' },
+    expectedMeasurement: 'Ukur perubahan pada metrik funnel yang tersedia.',
+  }],
+};
+const repairedStore = parseAndValidate(JSON.stringify(unsupportedStoreTracking), storeContext);
+
 const checks = [
   ['valid output passes', validateAnalysisOutput(validOutput, context).valid === true],
   ['unknown evidence is rejected', validateAnalysisOutput(invalidOutput, context).valid === false],
@@ -71,6 +108,9 @@ const checks = [
   ['ungrounded baseline is nulled', repaired.analysis.prioritizedActions[0].baseline.value === null],
   ['ungrounded numeric raises a warning', repaired.warnings.some((warning) => warning.includes('99') || warning.includes('42'))],
   ['grounded numeric within float tolerance is kept', parseAndValidate(JSON.stringify({ ...validOutput, criticalFindings: [{ ...validOutput.criticalFindings[0], impact: { metric: 'ctr', value: 2.5000000001, unit: '%' } }] }), context).analysis.criticalFindings[0].impact.value === 2.5000000001],
+  ['unsupported store tracking does not reject valid analysis', repairedStore.valid === true],
+  ['unsupported store tracking metadata is removed', repairedStore.analysis.prioritizedActions[0].metricKey === undefined && repairedStore.analysis.prioritizedActions[0].windowDays === undefined],
+  ['unsupported store tracking emits a warning', repairedStore.warnings.some((warning) => warning.includes('tidak terdaftar') || warning.includes('tidak sesuai'))],
   ['JSON parser validates output contract', parseAndValidate(JSON.stringify(validOutput), context).valid === true],
   ['invalid JSON is rejected', parseAndValidate('{not-json}', context).errorCode === 'INVALID_JSON'],
 ];

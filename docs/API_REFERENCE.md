@@ -546,6 +546,14 @@ Output JSON yang tidak memenuhi kontrak evidence ditolak sebagai `INVALID_RESPON
 aritmetika seperti ROAS, CTR, AOV, dan conversion rate dihitung di backend dari field sumber;
 Hermes hanya menafsirkan angka trusted tersebut.
 
+Metadata learning loop pada tindakan (`metricKey`, `windowDays`, `baseline`, dan `target`)
+bersifat opsional. Jika Hermes mengirim metric key yang tidak ada di katalog intent atau unit
+yang tidak sesuai, metadata tracking itu dibuang dan dicatat sebagai `validationWarnings`;
+tindakan tetap dikembalikan sebagai tindakan kualitatif tanpa outcome tracking. Dengan begitu,
+kesalahan pada metadata rekomendasi tidak menggagalkan seluruh analisa yang evidence utamanya
+valid. Angka yang tidak ditemukan pada evidence/trusted metrics tetap dikosongkan menjadi
+`null` dan tidak boleh ditampilkan sebagai angka terukur.
+
 Untuk mendiagnosis kegagalan, response error analisis menyertakan `requestId`,
 `validationErrors`, `validationWarnings`, dan object `diagnostic`. Backend juga menulis satu
 baris JSON berlabel `[Hermes][Diagnostic]` ke terminal, berisi tahap kegagalan, intent, periode,

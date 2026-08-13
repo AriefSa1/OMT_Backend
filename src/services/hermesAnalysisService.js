@@ -9,7 +9,7 @@ const { getSkill } = require('./hermesSkillRegistry');
 const { listMetrics } = require('./hermesMetricRegistry');
 const { reviewContext } = require('./hermesDecisionReviewer');
 
-const HERMES_PROMPT_VERSION = '1.1.0';
+const HERMES_PROMPT_VERSION = '1.2.0';
 const HERMES_OUTPUT_SCHEMA_VERSION = '1.0';
 
 function addRecommendationMetadata(analysis) {
@@ -681,7 +681,7 @@ class HermesAnalysisService {
       },
       {
         role: 'system',
-        content: 'Setiap prioritizedAction boleh menyertakan metricKey dan windowDays. Gunakan metricKey yang sama dengan baseline.metric/target.metric dan hanya angka/unit yang ada pada evidence; jika tidak dapat dibuktikan, gunakan null dan jangan mengarang.',
+        content: 'Setiap prioritizedAction boleh menyertakan metricKey dan windowDays. Gunakan metricKey yang sama dengan baseline.metric/target.metric dan hanya angka/unit yang ada pada evidence; jika tidak dapat dibuktikan, gunakan null dan jangan mengarang. Metadata tracking adalah opsional: bila metricKey tidak ada di Metric contract, jangan gunakan metricKey/windowDays/baseline/target untuk metrik itu; tetap kembalikan tindakan sebagai tindakan kualitatif tanpa tracking.',
       },
       {
         role: 'system',
