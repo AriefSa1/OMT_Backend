@@ -698,21 +698,29 @@ class WarehouseService {
         : [];
 
       // Retur per-marketplace: best-effort dari endpoint lama (punya creturn_amount).
-      // Gagal/lambat → biarkan 0, jangan sampai merusak data utama.
+      // Gagal/lambat → tandai tidak tersedia; 0 akan terbaca sebagai "tidak ada retur"
+      // dan tidak boleh dipakai untuk menggantikan pengukuran yang gagal.
+      const nullableNumber = (value) => {
+        if (value === null || value === undefined || value === '') return null;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
       const returnsByMp = new Map();
+      let returnsMeasured = false;
       try {
         const perfUrl = `${origin}/v2/statistic/marketplaces/performance?${buildParams('event').toString()}`;
         const perfRes = await this.fetchAuthenticatedData(perfUrl);
         const perfList = Array.isArray(perfRes?.data) ? perfRes.data : [];
+        returnsMeasured = true;
         for (const r of perfList) {
           const id = String(r.mp_id ?? r.marketplace?.id ?? '');
-          if (id) returnsByMp.set(id, Number(r.creturn_amount) || 0);
+          if (id) returnsByMp.set(id, nullableNumber(r.creturn_amount));
         }
       } catch (retErr) {
         console.warn('[Warehouse Service] Retur (creturn) tidak tersedia:', retErr.message);
       }
 
-      const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+      const num = nullableNumber;
       const rows = list.map((r) => {
         const mp = r.marketplace || {};
         const owner = Array.isArray(r.user_marketplaces) ? r.user_marketplaces[0] : null;
@@ -732,7 +740,9 @@ class WarehouseService {
           adsTotal: num(r.ads_total),              // Nilai Iklan
           estimatedProfit: num(r.estimate_profit),
           profitLoss: num(r.profit_loss),          // L/R (estimate - ads), = dashboard Gudang
-          returnAmount: returnsByMp.get(id) || 0,  // digabung dari endpoint lama
+          returnAmount: returnsMeasured
+            ? (returnsByMp.has(id) ? returnsByMp.get(id) : 0)
+            : null,
           wdAmount: num(r.wd_total),
         };
       });

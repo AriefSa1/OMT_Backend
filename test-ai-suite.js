@@ -70,7 +70,11 @@ async function main() {
   const r2 = await aiService.optimizeAdsKeywordsAndBids({ campaignName: 'X', spend: 1, sales: 1, roas: 1, ctr: 1 });
   check('reports RATE_LIMITED once retries are exhausted', r2.success === false && r2.errorCode === 'RATE_LIMITED');
   check('fallbackPayload (empty arrays) still present on failure', Array.isArray(r2.negativeKeywordsToExclude));
-  check('stopped after 1 + maxRetries(2) = 3 attempts, not more', calls2() === 3);
+  const expectedRateLimitedCalls = aiService.geminiModelChain.length * 3;
+  check(
+    'stopped after 1 + maxRetries(2) attempts per configured Gemini model, not more',
+    calls2() === expectedRateLimitedCalls,
+  );
 
   console.log('\n3. A non-retryable 400 — must fail on the first attempt, no retry wasted');
   const calls3 = mockGemini([fakeApiError(400, { error: { message: 'bad request' } })]);

@@ -26,6 +26,7 @@
     "test:hermes-ranges": "node test-hermes-range-output.js",
     "test:shopee-product-pagination": "node test-shopee-product-pagination.js",
     "test:shopee-dashboard-ranges": "node test-shopee-dashboard-range.js",
+    "test:shopee-traffic-sources": "node test-shopee-traffic-sources.js",
     "docs": "node docs/index.js",
     "docs:ai": "node docs/explain-ai.js"
   },

@@ -35,6 +35,7 @@ const jobQueueService = require('./src/services/jobQueueService');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const backgroundJobsDisabled = process.env.DISABLE_BACKGROUND_JOBS === '1';
 
 // Render menaruh server di belakang proxy. Tanpa ini, req.ip berisi IP proxy (sama untuk
 // semua orang) sehingga rate limit per-IP tak berguna, dan Express bisa salah menilai
@@ -170,14 +171,22 @@ async function initApp() {
       loginFrom: config.warehouseLoginFrom,
     });
 
-    initCronJobs(config.cronInterval);
-    // Start background job queue worker — processes SYNC jobs asynchronously
-    // so /api/sync/run-async returns immediately instead of blocking on Shopee API calls.
-    jobQueueService.start();
+    if (backgroundJobsDisabled) {
+      console.log('[Background Jobs] Disabled by DISABLE_BACKGROUND_JOBS=1');
+    } else {
+      initCronJobs(config.cronInterval);
+      // Start background job queue worker — processes SYNC jobs asynchronously
+      // so /api/sync/run-async returns immediately instead of blocking on Shopee API calls.
+      jobQueueService.start();
+    }
   } catch (err) {
     console.error('Failed to load configuration from database on startup:', err.message);
-    initCronJobs();
-    jobQueueService.start();
+    if (backgroundJobsDisabled) {
+      console.log('[Background Jobs] Disabled by DISABLE_BACKGROUND_JOBS=1');
+    } else {
+      initCronJobs();
+      jobQueueService.start();
+    }
   }
 }
 

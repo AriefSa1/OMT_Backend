@@ -975,7 +975,7 @@ class ShopeeService {
 
       return {
         source: 'SHOPEE_API',
-        days: safeDays,
+        days: spanDays,
         dataAsOf: new Date().toISOString(),
         totalSales: asFiniteNumber(overview.total_sales),
         channels: definitions
